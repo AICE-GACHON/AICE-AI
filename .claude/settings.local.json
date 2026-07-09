@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__8d2d59d2-8c00-4d84-a6f2-6357ee03bda1__notion-fetch",
+      "Bash(docker --version)",
+      "Bash(git --version)",
+      "Bash(where python *)",
+      "Bash(py -3.11 --version)",
+      "Bash(py -3.12 --version)",
+      "Bash(py -3.13 --version)",
+      "Bash(git init *)",
+      "Bash(git branch *)",
+      "Bash(python -m py_compile src/card_rag/*.py src/card_rag/db/*.py src/card_rag/schemas/*.py src/card_rag/ingestion/*.py src/card_rag/rag/*.py src/card_rag/rules/*.py)"
+    ]
+  }
+}
