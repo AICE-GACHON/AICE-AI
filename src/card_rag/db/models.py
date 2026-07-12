@@ -44,7 +44,10 @@ class BenefitClause(Base):
     benefit_type: Mapped[str] = mapped_column(String(20))                  # 적립 | 청구할인
 
     # 정형 숫자 — 규칙 엔진이 그대로 사용(사람 검수 필수)
-    rate: Mapped[float] = mapped_column(Numeric(5, 2))                     # % (적립률/할인율)
+    value_type: Mapped[str] = mapped_column(String(10), default="percent")  # percent | flat
+    rate: Mapped[float] = mapped_column(Numeric(5, 2), default=0)          # % (value_type=percent)
+    flat_amount: Mapped[Optional[int]] = mapped_column(Integer)           # 원 (value_type=flat, 건당 정액)
+    flat_min_txn: Mapped[int] = mapped_column(Integer, default=0)         # flat 적용 최소 결제액(원)
     monthly_cap: Mapped[Optional[int]] = mapped_column(Integer)           # 월 한도(원), 없으면 NULL
     min_spend: Mapped[int] = mapped_column(Integer, default=0)            # 전월실적 요건(원)
 
@@ -54,10 +57,36 @@ class BenefitClause(Base):
 
     # 검수·추적용
     source_span: Mapped[Optional[str]] = mapped_column(Text)              # 추출 근거 원문
-    embedding_text: Mapped[Optional[str]] = mapped_column(Text)           # 실제 임베딩한 문자열(투명성)
-    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(settings.embed_dim))
+
+    # 임베딩: 포함/제외를 분리 저장(3라운드 결정) — 가맹점 query와 각각 유사도 비교해
+    # sim_include vs sim_exclude 로 자격 신호를 만든다.
+    include_text: Mapped[Optional[str]] = mapped_column(Text)
+    include_embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(settings.embed_dim))
+    exclude_text: Mapped[Optional[str]] = mapped_column(Text)
+    exclude_embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(settings.embed_dim))
+
+    # Q&A/일반 검색용 전체 임베딩(카드+업종+혜택+조건 통합). 추천용 include/exclude와 별개.
+    search_text: Mapped[Optional[str]] = mapped_column(Text)
+    search_embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(settings.embed_dim))
 
     card: Mapped["Card"] = relationship(back_populates="clauses")
+
+
+class PolicyClause(Base):
+    """정책 청크 = 혜택절 하나에 안 담기는 카드 단위 규칙(전역 제외·통합한도·특약).
+
+    약관 심화 판정(A)에서 혜택절과 함께 검색·참조된다.
+    """
+
+    __tablename__ = "policy_clauses"
+
+    policy_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    card_id: Mapped[str] = mapped_column(ForeignKey("cards.card_id", ondelete="CASCADE"), index=True)
+    policy_type: Mapped[str] = mapped_column(String(30), index=True)     # global_exclude 등
+    category: Mapped[Optional[str]] = mapped_column(String(30))          # null=카드 전체
+    text: Mapped[str] = mapped_column(Text)
+    source_span: Mapped[Optional[str]] = mapped_column(Text)
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(settings.embed_dim))
 
 
 class CategoryMapping(Base):

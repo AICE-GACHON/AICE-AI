@@ -25,10 +25,11 @@ _CATEGORIES = ["카페", "음식점", "편의점", "대형마트", "온라인쇼
 SYSTEM_PROMPT = (
     "너는 한국 신용카드 약관·상품설명서에서 '혜택절'을 구조화 추출하는 전문가다.\n"
     "규칙:\n"
-    "1) 하나의 혜택은 (업종 × 혜택유형 × 전월실적구간) 단위로 분리한다. "
-    "전월실적 구간별로 적립률/한도가 다르면 각 구간을 별도 혜택절로 만든다.\n"
-    "2) rate/monthly_cap/min_spend 숫자는 원문에 명시된 값만 쓴다. 추정·계산 금지. "
-    "불명확하면 confidence를 low로 둔다.\n"
+    "1) 하나의 혜택은 (업종 × 혜택유형 × 전월실적구간 × 결제금액구간) 단위로 분리한다. "
+    "전월실적 구간이나 결제금액 구간('1만원 이상/미만')별로 값이 다르면 각 구간을 별도 혜택절로 만든다.\n"
+    "2) 정률(%) 혜택은 value_type='percent'로 rate에, 건당 정액 캐시백은 value_type='flat'으로 "
+    "flat_amount(원)·flat_min_txn(적용 최소 결제액)에 담는다. "
+    "숫자(rate/flat_amount/monthly_cap/min_spend)는 원문 명시값만. 추정 금지, 불명확하면 confidence=low.\n"
     "3) include_notes/exclude_notes에는 포함/제외 가맹점·조건을 원문 표현 그대로 담는다.\n"
     "4) source_span에는 판단 근거가 된 원문 문장을 그대로 인용한다.\n"
     f"5) category는 다음 중 하나로만 매핑한다: {', '.join(_CATEGORIES)}."
@@ -48,7 +49,10 @@ _TOOL = {
                     "properties": {
                         "category": {"type": "string", "enum": _CATEGORIES},
                         "benefit_type": {"type": "string", "enum": ["적립", "청구할인"]},
+                        "value_type": {"type": "string", "enum": ["percent", "flat"]},
                         "rate": {"type": "number"},
+                        "flat_amount": {"type": ["integer", "null"]},
+                        "flat_min_txn": {"type": "integer"},
                         "monthly_cap": {"type": ["integer", "null"]},
                         "min_spend": {"type": "integer"},
                         "include_notes": {"type": "string"},
@@ -56,7 +60,7 @@ _TOOL = {
                         "source_span": {"type": "string"},
                         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                     },
-                    "required": ["category", "benefit_type", "rate", "source_span"],
+                    "required": ["category", "benefit_type", "value_type", "source_span"],
                 },
             }
         },

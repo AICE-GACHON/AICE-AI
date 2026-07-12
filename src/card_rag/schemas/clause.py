@@ -15,6 +15,7 @@ InternalCategory = Literal[
 ]
 
 BenefitType = Literal["적립", "청구할인"]
+ValueType = Literal["percent", "flat"]
 Confidence = Literal["high", "medium", "low"]
 
 
@@ -23,7 +24,10 @@ class ExtractedClause(BaseModel):
 
     category: InternalCategory
     benefit_type: BenefitType
-    rate: float = Field(description="적립률/할인율 (%). 원문에 명시된 값만.")
+    value_type: ValueType = Field(default="percent", description="percent(정률) | flat(건당 정액 캐시백)")
+    rate: float = Field(default=0.0, description="적립률/할인율 (%). value_type=percent일 때. 원문 명시값만.")
+    flat_amount: Optional[int] = Field(default=None, description="건당 정액(원). value_type=flat일 때.")
+    flat_min_txn: int = Field(default=0, description="정액 적용 최소 결제액(원). '1만원 이상 500' 같은 구간은 별도 절로 분리.")
     monthly_cap: Optional[int] = Field(default=None, description="월 한도(원). 없으면 null.")
     min_spend: int = Field(default=0, description="전월실적 요건(원). 구간마다 별도 절로 분리.")
     include_notes: str = Field(default="", description="포함되는 가맹점/조건(원문 표현).")
