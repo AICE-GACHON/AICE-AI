@@ -1,22 +1,5 @@
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-
-# Env / secrets
 .env
-.env.local
-
-# Data (원문 약관은 저작권/용량 이슈로 커밋 제외; 승인된 clauses JSON만 선택 커밋)
-data/raw/**
-data/normalized/**
-!data/**/.gitkeep
-
-# OS
-.DS_Store
-Thumbs.db
+.venv/
+__pycache__/
+*.pyc
+data/

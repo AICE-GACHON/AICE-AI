@@ -1,0 +1,295 @@
+# AI 파트 상세 설계서 — ML/AI 논문 리서치 어시스턴트
+
+> 기획서(`ML_AI_논문_RAG_서비스_기획서.md`)의 AI 파트 구체화 문서.
+> 프론트/백엔드는 다른 팀원 담당. AI 파트는 **Python 패키지**로 개발해 나중에 Python 백엔드에서 import하여 통합한다.
+
+---
+
+## 1. 확정된 기술 결정 사항
+
+| 항목 | 결정 | 비고 |
+|---|---|---|
+| 벡터 DB | **pgvector** (Postgres) | 벡터 + 메타데이터 + 인용 엣지를 Postgres 하나로 통합 |
+| 그래프 DB | **사용 안 함** | 인용 관계는 엣지 테이블로 충분. 다중 홉 순회 기능 없음 |
+| 임베딩 모델 | **SPECTER2** (allenai, HuggingFace) | 학술 논문 특화. 논문 1편 = title+abstract → 벡터 1개 |
+| 오케스트레이션 | **LangGraph** | 고정 DAG + 병렬 노드. LLM supervisor 라우팅 없음 |
+| LLM | **Claude API** | 추출/요약: Haiku, 종합 리포트: Sonnet 티어 분리 |
+| 검색 방식 | **하이브리드** | SPECTER2 벡터 + Postgres full-text, RRF로 결합 |
+| 데이터 범위 | ICLR + NeurIPS **최근 5년+** (2020~) | 약 5만+ 편. 수집 파이프라인 체크포인트 필수 |
+| 사용자 입력 | 텍스트(제목+초록) + **PDF draft 업로드** | PDF에서 제목/초록 추출 후 동일 파이프라인 |
+| 리뷰 지적 항목 추출 | **오프라인 배치** (수집 시) | 쿼리 시점엔 클러스터링+집계만 |
+| 유사성 근거 태깅 | **MVP 포함** | 상위 10~20편에 대해 쿼리 시점 LLM 태깅 |
+| 재투고 흐름 추적 | **제대로 구현** | arXiv ID + 제목 유사도 + 저자 매칭 |
+| 제공 형태 | **Python 패키지** | 백엔드도 Python. FastAPI 데모 서버는 개발용으로만 |
+| 패키지 관리 | **pip + requirements.txt** | 팀 통일 |
+
+---
+
+## 2. 전체 아키텍처
+
+### 2.1 두 개의 독립된 파이프라인
+
+```
+[A] 수집/인덱싱 파이프라인 (오프라인 배치, 주기적 실행)
+    OpenReview API ──┐
+    Semantic Scholar ─┼─→ 정규화 → LLM 리뷰 구조화 → 임베딩 → Postgres 적재
+    arXiv API ────────┘
+
+[B] 쿼리 파이프라인 (LangGraph, 사용자 요청마다 실행)
+    사용자 입력 → 검색 → 병렬 분석 → 종합 리포트
+```
+
+### 2.2 쿼리 파이프라인 (LangGraph DAG)
+
+Supervisor 패턴 대신 **고정 DAG**. 워크플로우가 매번 동일하므로 LLM 라우팅은
+불필요한 비용/지연/불확실성만 추가한다. LLM은 지능이 필요한 노드 안에서만 사용.
+
+```
+        ┌─────────────────────────────┐
+        │  input_node                 │  텍스트 or PDF → 제목/초록 정규화
+        └──────────────┬──────────────┘
+        ┌──────────────▼──────────────┐
+        │  retrieval_node             │  하이브리드 검색 (벡터+FTS, RRF)
+        │                             │  → 유사 논문 상위 K편 (기본 20)
+        └──────┬──────────────┬───────┘
+     ┌─────────▼────┐  ┌──────▼─────────┐     ← 이 3개만 병렬
+     │ similarity_  │  │ review_        │  ┌────────────────┐
+     │ tagging_node │  │ analysis_node  │  │ venue_trend_   │
+     │ (LLM 태깅)   │  │ (클러스터링)    │  │ node (SQL 집계) │
+     └─────────┬────┘  └──────┬─────────┘  └──────┬─────────┘
+        ┌──────▼──────────────▼────────────────────▼───────┐
+        │  synthesis_node (Sonnet)                          │
+        │  → 최종 구조화 리포트 (JSON + 마크다운 요약)        │
+        └───────────────────────────────────────────────────┘
+```
+
+**노드별 역할**
+
+| 노드 | LLM 사용 | 내용 |
+|---|---|---|
+| `input_node` | PDF일 때만 (Haiku) | PDF → PyMuPDF로 텍스트 추출 → Haiku로 제목/초록 식별. 텍스트 입력이면 통과 |
+| `retrieval_node` | 없음 | SPECTER2 임베딩 → pgvector 코사인 검색 + Postgres `tsvector` full-text 검색 → RRF(Reciprocal Rank Fusion) 결합 → 상위 K편 |
+| `similarity_tagging_node` | Haiku | 상위 10~20편 각각에 대해 "왜 유사한가" 태깅: `methodology` / `dataset` / `problem_setting` / `citation` + 한 줄 근거. 논문당 1콜, 병렬 호출 |
+| `review_analysis_node` | 없음 (임베딩만) | 유사 논문들의 **사전 추출된 지적 항목**을 DB에서 로드 → 임베딩 기반 클러스터링(HDBSCAN 또는 agglomerative) → "10편 중 6편이 실험 규모 지적" 형태로 집계 |
+| `venue_trend_node` | 없음 | SQL 집계: 유사 논문들의 최종 decision 분포, 학회별 accept 비율, 재투고 흐름(예: ICLR reject → NeurIPS accept N건) |
+| `synthesis_node` | Sonnet | 세 분석 결과를 받아 사람이 읽는 종합 리포트 생성. 구조화 JSON도 함께 반환 (프론트가 컴포넌트별 렌더링 가능하도록) |
+
+### 2.3 수집/인덱싱 파이프라인 (배치)
+
+5년치(5만+ 편)이므로 **재시작 가능(체크포인트)** 설계가 필수.
+
+```
+1. fetch_openreview   : venue×연도 단위로 논문+리뷰+메타리뷰+rebuttal+decision 수집
+2. fetch_s2           : Semantic Scholar에서 메타데이터, 인용 관계, 저자 ID, venue 보강
+3. fetch_arxiv        : arXiv ID 매칭, 초록/카테고리 보강
+4. extract_review_points : 리뷰 → Haiku → 구조화된 지적 항목 리스트 (아래 §4)
+5. link_submissions   : 재투고 흐름 매칭 (아래 §6)
+6. embed              : SPECTER2로 논문/지적항목 임베딩
+7. load               : Postgres 적재 (upsert, 단계별 상태 컬럼으로 체크포인트)
+```
+
+- 각 단계는 독립 실행 가능한 스크립트 + `ingest_status` 테이블로 진행 상태 추적
+- OpenReview API v2는 rate limit 존재 → 지수 백오프 + venue×연도 단위 체크포인트
+- LLM 비용: 리뷰 지적 항목 추출이 대부분. 리뷰 ~20만 건 × Haiku ≈ 감당 가능한 수준이지만, **1개 venue×연도로 먼저 파일럿 실행해서 편당 비용 측정 후 전체 실행**
+
+---
+
+## 3. 데이터 스키마 (Postgres + pgvector)
+
+```sql
+-- 논문 (검색의 기본 단위)
+CREATE TABLE papers (
+    id              BIGSERIAL PRIMARY KEY,
+    openreview_id   TEXT UNIQUE,
+    arxiv_id        TEXT,
+    s2_paper_id     TEXT,
+    title           TEXT NOT NULL,
+    abstract        TEXT,
+    venue           TEXT,          -- 'ICLR', 'NeurIPS'
+    year            INT,
+    decision        TEXT,          -- 'accept-oral', 'accept-poster', 'reject', 'withdrawn'
+    final_venue     TEXT,          -- 최종 게재처 (재투고 추적 결과)
+    embedding       vector(768),   -- SPECTER2
+    tsv             tsvector GENERATED ALWAYS AS
+                      (to_tsvector('english', title || ' ' || coalesce(abstract,''))) STORED
+);
+CREATE INDEX ON papers USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX ON papers USING gin (tsv);
+
+-- 저자 (재투고 매칭용)
+CREATE TABLE authors (
+    id           BIGSERIAL PRIMARY KEY,
+    s2_author_id TEXT UNIQUE,
+    name         TEXT
+);
+CREATE TABLE paper_authors (
+    paper_id  BIGINT REFERENCES papers(id),
+    author_id BIGINT REFERENCES authors(id),
+    position  INT,
+    PRIMARY KEY (paper_id, author_id)
+);
+
+-- 리뷰 원문
+CREATE TABLE reviews (
+    id            BIGSERIAL PRIMARY KEY,
+    paper_id      BIGINT REFERENCES papers(id),
+    openreview_id TEXT UNIQUE,
+    review_type   TEXT,   -- 'review', 'meta_review', 'rebuttal', 'decision'
+    rating        TEXT,
+    confidence    TEXT,
+    content       JSONB   -- OpenReview 원본 필드 보존
+);
+
+-- 사전 추출된 리뷰 지적 항목 (클러스터링의 단위)
+CREATE TABLE review_points (
+    id         BIGSERIAL PRIMARY KEY,
+    review_id  BIGINT REFERENCES reviews(id),
+    paper_id   BIGINT REFERENCES papers(id),
+    aspect     TEXT,        -- 통제된 분류 (§4)
+    sentiment  TEXT,        -- 'weakness', 'strength', 'question'
+    text       TEXT,        -- 지적 내용 요약 (1~2문장)
+    embedding  vector(768)
+);
+CREATE INDEX ON review_points USING hnsw (embedding vector_cosine_ops);
+
+-- 인용 엣지 (그래프 DB 대체)
+CREATE TABLE citations (
+    citing_paper_id BIGINT REFERENCES papers(id),
+    cited_paper_id  BIGINT REFERENCES papers(id),
+    PRIMARY KEY (citing_paper_id, cited_paper_id)
+);
+
+-- 재투고 연결 (같은 논문의 복수 투고 기록)
+CREATE TABLE submission_links (
+    earlier_paper_id BIGINT REFERENCES papers(id),
+    later_paper_id   BIGINT REFERENCES papers(id),
+    match_method     TEXT,      -- 'arxiv_id', 'title_exact', 'title_author_fuzzy'
+    confidence       REAL,
+    PRIMARY KEY (earlier_paper_id, later_paper_id)
+);
+
+-- 수집 체크포인트
+CREATE TABLE ingest_status (
+    venue TEXT, year INT, stage TEXT, status TEXT, updated_at TIMESTAMPTZ,
+    PRIMARY KEY (venue, year, stage)
+);
+```
+
+---
+
+## 4. 청킹/임베딩 전략
+
+**핵심: 검색 대상별로 단위가 다르다. 논문 유사도 검색에는 청킹이 없다.**
+
+| 대상 | 단위 | 모델 | 이유 |
+|---|---|---|---|
+| 논문 유사도 검색 | **논문 1편 = 벡터 1개** (title + `[SEP]` + abstract) | SPECTER2 (proximity adapter) | SPECTER2가 정확히 이 용도로 학습됨. 본문 청킹은 노이즈만 추가 |
+| 리뷰 지적 패턴 | **지적 항목 1개 = 벡터 1개** | SPECTER2 base (또는 동일 모델 통일) | 리뷰 전체 임베딩은 여러 주제가 섞여 클러스터링 품질 저하. LLM으로 항목 분리 후 임베딩 |
+| 본문 full-text | **MVP 제외** | — | Phase 3 "예상 지적 예측" 때 섹션 단위로 추가 |
+
+**리뷰 지적 항목 추출 (오프라인 배치, Haiku)**
+
+리뷰 1건 → 아래 형태의 리스트로 구조화:
+
+```json
+[
+  {"aspect": "experimental_scale", "sentiment": "weakness",
+   "text": "Experiments limited to CIFAR-10/100; no ImageNet-scale validation."},
+  {"aspect": "novelty", "sentiment": "weakness",
+   "text": "Method is incremental over prior work X."}
+]
+```
+
+`aspect`는 자유 생성이 아니라 **통제된 분류 체계**를 프롬프트에 명시 (클러스터링·집계 품질을 위해):
+`novelty` / `experimental_scale` / `baselines` / `clarity` / `theoretical_soundness` / `reproducibility` / `related_work` / `significance` / `other`
+
+쿼리 시점 클러스터링은 이 aspect 1차 그룹핑 + 임베딩 유사도 2차 병합으로 "유사 논문 10편 중 6편이 실험 규모 지적" 형태 집계 생성.
+
+---
+
+## 5. 하이브리드 검색 상세
+
+```
+score = RRF(vector_rank, fts_rank)   # 1/(60+rank) 합산, 표준 RRF
+```
+
+1. SPECTER2로 쿼리(제목+초록) 임베딩 → pgvector 코사인 top-50
+2. Postgres `ts_rank` full-text top-50 (특정 데이터셋명·기법명 정확 매칭 보완)
+3. RRF 결합 → 상위 K=20편 반환
+4. 상위 20편만 similarity_tagging_node로 전달
+
+전부 Postgres 쿼리 1~2개로 처리 가능. 별도 검색 엔진 불필요.
+
+---
+
+## 6. 재투고 흐름 매칭 (제대로 구현)
+
+우선순위 폴백 체인:
+
+1. **arXiv ID 일치** — 다른 venue 투고 기록이 같은 arXiv ID를 가리키면 확정 (confidence 1.0)
+2. **제목 정확 일치** (정규화 후: 소문자, 공백/특수문자 정리) — confidence 0.95
+3. **제목 유사 + 저자 겹침** — 제목 임베딩(또는 문자열 유사도 ≥ 임계값) AND 저자 집합 Jaccard ≥ 0.5 → confidence 산출, 임계값 이하 폐기
+
+결과는 `submission_links`에 저장하고 venue_trend_node에서
+"이 유형 논문의 재투고 흐름: ICLR'24 reject → NeurIPS'24 accept 12건" 형태로 집계.
+저자 매칭을 위해 Semantic Scholar **author ID를 수집 단계에서 반드시 저장**.
+
+---
+
+## 7. 패키지 구조
+
+```
+paper_assistant/               # pip install -e . 로 백엔드에서 import
+├── requirements.txt
+├── setup.py (or pyproject.toml)
+├── paper_assistant/
+│   ├── __init__.py            # 공개 API: analyze(query) -> Report
+│   ├── config.py              # DB URL, API 키 (환경변수)
+│   ├── ingest/                # 파이프라인 A (배치)
+│   │   ├── openreview_client.py
+│   │   ├── s2_client.py
+│   │   ├── arxiv_client.py
+│   │   ├── review_extractor.py    # Haiku 지적항목 추출
+│   │   ├── submission_linker.py   # 재투고 매칭
+│   │   └── run_ingest.py          # CLI 엔트리포인트 (체크포인트 재개)
+│   ├── embedding/
+│   │   └── specter2.py
+│   ├── retrieval/
+│   │   └── hybrid_search.py       # pgvector + FTS + RRF
+│   ├── graph/                 # 파이프라인 B (LangGraph)
+│   │   ├── state.py               # TypedDict 상태 정의
+│   │   ├── nodes.py               # 6개 노드
+│   │   └── pipeline.py            # DAG 조립
+│   ├── pdf/
+│   │   └── extract.py             # PyMuPDF + Haiku 제목/초록 추출
+│   └── schemas.py             # Pydantic: Report, SimilarPaper, ReviewPattern, VenueTrend
+├── scripts/
+│   └── init_db.sql
+├── demo_server/               # 개발용 FastAPI (통합 전 데모/테스트)
+│   └── main.py
+└── tests/
+```
+
+**백엔드 통합 계약(contract)**: 공개 API는 단 하나 —
+`paper_assistant.analyze(title, abstract, pdf_bytes=None) -> Report` (Pydantic 모델).
+백엔드 팀은 이 함수 시그니처와 `Report` 스키마만 알면 됨. 스트리밍이 필요해지면
+LangGraph의 `astream()`을 그대로 노출하는 `analyze_stream()` 추가.
+
+---
+
+## 8. 구현 순서 (AI 파트 로드맵)
+
+1. **주차 1 — 데이터 파일럿**: OpenReview API 탐색, ICLR 2024 1개 연도만 수집 → 스키마 검증, 리뷰 추출 프롬프트 튜닝 + 편당 LLM 비용 측정
+2. **주차 2 — 검색 코어**: SPECTER2 임베딩 + pgvector 적재 + 하이브리드 검색. 검증: 아는 논문 초록 넣고 관련 논문이 상위에 오는지 정성 평가
+3. **주차 3 — LangGraph 파이프라인**: 6개 노드 조립, synthesis 리포트 품질 튜닝
+4. **주차 4 — 전체 수집**: 5년치 배치 실행 (체크포인트로 며칠에 걸쳐), 재투고 매칭
+5. **주차 5 — 마감**: PDF 입력, demo_server, Report 스키마 문서화 → 백엔드 팀 전달
+
+---
+
+## 9. 리스크 (AI 파트 한정)
+
+- **SPECTER2 차원 확인**: base 768차원. adapter 버전에 따라 다를 수 있으니 스키마 확정 전 실측
+- **OpenReview 스키마 변동**: venue·연도마다 리뷰 필드 구조가 다름 (예: ICLR 2020과 2024의 rating 필드 상이) → `reviews.content JSONB`로 원본 보존 후 정규화 레이어 분리
+- **리뷰 추출 품질**: aspect 분류가 흔들리면 클러스터링 전체가 흔들림 → 파일럿 단계에서 수동 라벨 50건과 비교 검증
+- **Claude API 비용**: 수집 단계가 지배적. 파일럿에서 실측 후 전체 실행 여부 판단

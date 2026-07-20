@@ -1,0 +1,8 @@
+# 수집 단계 (1주차)
+requests>=2.32
+python-dotenv>=1.0
+
+# 이후 단계에서 추가 예정:
+# langgraph, anthropic          — 쿼리 파이프라인 (3주차)
+# torch, transformers, adapters — SPECTER2 임베딩 (2주차, Python 버전 호환 확인 필요)
+# psycopg[binary], pgvector     — DB 적재 (2주차)
