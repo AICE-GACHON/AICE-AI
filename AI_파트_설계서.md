@@ -220,6 +220,27 @@ score = RRF(vector_rank, fts_rank)   # 1/(60+rank) 합산, 표준 RRF
 
 전부 Postgres 쿼리 1~2개로 처리 가능. 별도 검색 엔진 불필요.
 
+### ⚠️ full-text 쿼리는 반드시 OR 결합할 것 (실측으로 발견한 함정)
+
+`plainto_tsquery`는 입력의 **모든 단어를 AND로 결합**한다. 사용자 입력이 초록
+전체(수백 단어)이므로 그 단어를 전부 포함하는 문서만 걸린다 —
+**실측: 200편 중 1편만 매칭되어 FTS가 사실상 무력화됐다.**
+
+```sql
+-- 잘못됨: 초록 전체를 넣으면 AND 조건이 되어 거의 매칭되지 않음
+WHERE tsv @@ plainto_tsquery('english', :query)
+
+-- 올바름: lexeme을 OR로 결합해 ts_rank가 겹치는 정도로 순위를 매김
+WITH q AS (SELECT to_tsquery('english', string_agg(lexeme, ' | ')) AS query
+           FROM unnest(to_tsvector('english', :query)))
+SELECT p.id FROM papers p, q WHERE p.tsv @@ q.query
+ORDER BY ts_rank(p.tsv, q.query) DESC
+```
+
+수정 후 같은 조건에서 200/200편 매칭되며, 벡터 검색에서 9~10위였던 논문이
+키워드 매칭 덕에 3~4위로 올라오는 **하이브리드 본래의 동작**이 확인됐다.
+회귀 방지 테스트: `tests/test_db_integration.py::test_fulltext_or_matching_beats_and_matching`
+
 ---
 
 ## 6. 재투고 흐름 매칭 (제대로 구현)
@@ -280,7 +301,7 @@ LangGraph의 `astream()`을 그대로 노출하는 `analyze_stream()` 추가.
 ## 8. 구현 순서 (AI 파트 로드맵)
 
 1. ~~**주차 1 — 데이터 파일럿**~~ **(진행 중)**: OpenReview API 탐색 ✅, 정규화 레이어 + 10개 venue 검증 ✅ → 남은 것: 리뷰 추출 프롬프트 튜닝 + 편당 LLM 비용 측정 (Anthropic 키 필요)
-2. **주차 2 — 검색 코어** *(임베딩 ✅ 완료, §11)*: ~~SPECTER2 임베딩~~ → 남은 것: pgvector 적재 + 하이브리드 검색
+2. ~~**주차 2 — 검색 코어**~~ **✅ 완료** (§11, §12): SPECTER2 임베딩 + pgvector 적재 + 하이브리드 검색, 200편 end-to-end 검증 통과
 3. **주차 3 — LangGraph 파이프라인**: 6개 노드 조립, synthesis 리포트 품질 튜닝
 4. **주차 4 — 전체 수집**: 5년치 배치 실행 (체크포인트로 며칠에 걸쳐), 재투고 매칭
 5. **주차 5 — 마감**: PDF 입력, demo_server, Report 스키마 문서화 → 백엔드 팀 전달
@@ -414,3 +435,46 @@ ICLR 2024 논문 **300편(무작위 쌍 89,700개)** 으로 측정한 코사인 
    백엔드/프론트 팀에 넘길 `Report` 스키마에는 **백분위를 담고 원시 코사인은 담지 않는다.**
 
 재측정이 필요하면 `scripts/measure_similarity_dist.py` 실행 (참조 분위수 갱신용).
+
+---
+
+## 12. DB 구축 및 검색 검증 결과 (2026-07-21)
+
+### 12.1 구성
+
+pgvector 공식 이미지(`pgvector/pgvector:pg17`)를 Docker로 기동. **포트 5433**을 쓴다
+(로컬에 다른 Postgres가 있어도 충돌하지 않도록).
+
+```bash
+docker compose up -d      # 최초 기동 시 scripts/init_db.sql 자동 실행
+```
+
+테이블 8개: `papers` / `reviews` / `review_points` / `authors` / `paper_authors` /
+`citations` / `submission_links` / `ingest_status`.
+확장: `vector`(임베딩), `pg_trgm`(재투고 제목 매칭).
+
+**벡터 인덱스(HNSW)는 스키마에 넣지 않았다.** 빈 테이블에 미리 만들면 적재 내내
+인덱스 갱신 비용이 발생하므로, 전체 적재 후 `scripts/build_indexes.sql`로 생성한다.
+
+### 12.2 End-to-end 검증 (ICLR 2024, 200편)
+
+| 단계 | 실측 |
+|---|---|
+| 수집 + 정규화 | 200편 |
+| 임베딩 (CPU) | 58초 |
+| DB 적재 | 0.9초 (논문 200 + 저자 902명) |
+| 하이브리드 검색 | **16ms** |
+
+쿼리 논문 자신이 1위로 반환되고, 2~5위가 전부 같은 분야(그래프 신경망) 논문으로
+채워지는 것을 확인. `tsvector`는 생성 컬럼이라 적재만 하면 자동으로 채워진다.
+
+### 12.3 Python 3.14 관련 이슈
+
+커넥션 풀을 명시적으로 닫지 않으면 인터프리터 종료 시
+`PythonFinalizationError: cannot join thread at interpreter shutdown`이 발생한다
+(3.14부터 종료 시점 스레드 join이 금지됨). `atexit.register(close_pool)`로 해결.
+
+### 12.4 남은 성능 과제
+
+현재 200편에서 16ms지만 **43,515편 전체에서는 HNSW 인덱스 없이 순차 스캔이 되어
+느려진다.** 전체 적재 후 `build_indexes.sql`을 실행하고 재측정할 것.

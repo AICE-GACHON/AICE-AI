@@ -11,6 +11,9 @@ torch>=2.9
 transformers>=4.57
 adapters>=1.3       # SPECTER2는 base 모델 + adapter 구조
 
+# DB (2주차)
+psycopg[binary,pool]>=3.2
+pgvector>=0.3
+
 # 이후 단계에서 추가 예정:
-# langgraph, anthropic      — 쿼리 파이프라인 (3주차)
-# psycopg[binary], pgvector — DB 적재 (2주차)
+# langgraph, anthropic  — 쿼리 파이프라인 (3주차)
