@@ -37,22 +37,41 @@ venue별 논문 수와 API 버전은 [AI_파트_설계서.md](AI_파트_설계�
 python -m paper_assistant.ingest.run_pilot 20   # ICLR 2024 샘플 20편 + 리뷰 수집
 python scripts/count_all.py                     # venue별 논문 수 집계
 python scripts/verify_normalize.py              # 10개 venue 정규화 검증
+python scripts/verify_embedding.py              # SPECTER2 차원·품질·속도 검증
 pytest tests/                                   # 단위 테스트
 ```
 
 `scripts/` 실행 시 `PYTHONPATH`에 저장소 루트가 필요하다 (Windows: `$env:PYTHONPATH="."`).
+
+## 임베딩
+
+SPECTER2(`allenai/specter2_base` + proximity adapter), **768차원**, 논문 1편 = 벡터 1개.
+**CPU로 충분하다** — 전체 43,515편이 약 0.8시간, GPU 불필요.
+
+```python
+from paper_assistant.embedding.specter2 import Specter2Embedder, similarity_percentile
+
+embedder = Specter2Embedder()
+vecs = embedder.encode([(title, abstract), ...])   # L2 정규화된 (N, 768)
+```
+
+⚠️ **원시 코사인 값을 사용자에게 노출하지 말 것.** SPECTER2는 유사도가 0.72~0.98에
+압축되어 있어 **무관한 논문쌍도 0.845가 나온다**. `similarity_percentile()`로 백분위로
+변환해서 전달한다. 자세한 측정치는 [AI_파트_설계서.md](AI_파트_설계서.md) §11.2 참고.
 
 ## 구조
 
 ```
 paper_assistant/
 ├── config.py                  # .env 로드
-└── ingest/
-    ├── openreview_client.py   # v1/v2 분기 + 토큰 캐시 + 페이지네이션 + 백오프
-    ├── normalize.py           # venue×연도별 필드 차이 → 단일 스키마
-    └── run_pilot.py           # ICLR 2024 파일럿 수집
+├── ingest/
+│   ├── openreview_client.py   # v1/v2 분기 + 토큰 캐시 + 페이지네이션 + 백오프
+│   ├── normalize.py           # venue×연도별 필드 차이 → 단일 스키마
+│   └── run_pilot.py           # ICLR 2024 파일럿 수집
+└── embedding/
+    └── specter2.py            # SPECTER2 임베딩 + 코사인→백분위 변환
 scripts/                       # 조사·검증용 (패키지 아님)
-tests/                         # 정규화 회귀 테스트
+tests/                         # 회귀 테스트 14건
 ```
 
 전체 목표 구조와 로드맵은 [AI_파트_설계서.md](AI_파트_설계서.md) §7–8 참고.
