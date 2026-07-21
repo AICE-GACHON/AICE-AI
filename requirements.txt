@@ -1,6 +1,8 @@
 # 수집 단계 (1주차)
 requests>=2.32
 python-dotenv>=1.0
+pyjwt>=2.8          # 캐시된 로그인 토큰 만료 검사
+pytest>=8.0         # 테스트
 
 # 이후 단계에서 추가 예정:
 # langgraph, anthropic          — 쿼리 파이프라인 (3주차)

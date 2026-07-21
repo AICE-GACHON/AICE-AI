@@ -10,9 +10,9 @@ import time
 from collections import Counter
 
 from paper_assistant import config
-from paper_assistant.ingest.openreview_client import OpenReviewClient
+from paper_assistant.ingest.openreview_client import VENUE_REGISTRY, get_client
 
-VENUE = "ICLR.cc/2024/Conference"
+VENUE_NAME = "ICLR 2024"
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -22,11 +22,12 @@ def main(n_samples: int = 20):
     out_dir = config.RAW_DIR / "pilot_iclr2024"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    client = OpenReviewClient()
+    base, invitation = VENUE_REGISTRY[VENUE_NAME]
+    client = get_client(base)
 
     log.info("제출 논문 %d편 샘플 수집 중...", n_samples)
     submissions = []
-    for note in client.iter_submissions(VENUE):
+    for note in client.iter_notes(invitation=invitation):
         submissions.append(note)
         if len(submissions) >= n_samples:
             break

@@ -15,7 +15,7 @@
 | 오케스트레이션 | **LangGraph** | 고정 DAG + 병렬 노드. LLM supervisor 라우팅 없음 |
 | LLM | **Claude API** | 추출/요약: Haiku, 종합 리포트: Sonnet 티어 분리 |
 | 검색 방식 | **하이브리드** | SPECTER2 벡터 + Postgres full-text, RRF로 결합 |
-| 데이터 범위 | ICLR + NeurIPS **최근 5년+** (2020~) | 약 5만+ 편. 수집 파이프라인 체크포인트 필수 |
+| 데이터 범위 | ICLR + NeurIPS **최근 5년+** (2020~) | **실측 43,515편** / 리뷰 약 15만 건 (§10) |
 | 사용자 입력 | 텍스트(제목+초록) + **PDF draft 업로드** | PDF에서 제목/초록 추출 후 동일 파이프라인 |
 | 리뷰 지적 항목 추출 | **오프라인 배치** (수집 시) | 쿼리 시점엔 클러스터링+집계만 |
 | 유사성 근거 태깅 | **MVP 포함** | 상위 10~20편에 대해 쿼리 시점 LLM 태깅 |
@@ -279,7 +279,7 @@ LangGraph의 `astream()`을 그대로 노출하는 `analyze_stream()` 추가.
 
 ## 8. 구현 순서 (AI 파트 로드맵)
 
-1. **주차 1 — 데이터 파일럿**: OpenReview API 탐색, ICLR 2024 1개 연도만 수집 → 스키마 검증, 리뷰 추출 프롬프트 튜닝 + 편당 LLM 비용 측정
+1. ~~**주차 1 — 데이터 파일럿**~~ **(진행 중)**: OpenReview API 탐색 ✅, 정규화 레이어 + 10개 venue 검증 ✅ → 남은 것: 리뷰 추출 프롬프트 튜닝 + 편당 LLM 비용 측정 (Anthropic 키 필요)
 2. **주차 2 — 검색 코어**: SPECTER2 임베딩 + pgvector 적재 + 하이브리드 검색. 검증: 아는 논문 초록 넣고 관련 논문이 상위에 오는지 정성 평가
 3. **주차 3 — LangGraph 파이프라인**: 6개 노드 조립, synthesis 리포트 품질 튜닝
 4. **주차 4 — 전체 수집**: 5년치 배치 실행 (체크포인트로 며칠에 걸쳐), 재투고 매칭
@@ -290,6 +290,80 @@ LangGraph의 `astream()`을 그대로 노출하는 `analyze_stream()` 추가.
 ## 9. 리스크 (AI 파트 한정)
 
 - **SPECTER2 차원 확인**: base 768차원. adapter 버전에 따라 다를 수 있으니 스키마 확정 전 실측
-- **OpenReview 스키마 변동**: venue·연도마다 리뷰 필드 구조가 다름 (예: ICLR 2020과 2024의 rating 필드 상이) → `reviews.content JSONB`로 원본 보존 후 정규화 레이어 분리
+- ~~**OpenReview 스키마 변동**~~ → **해소됨**. 실측 결과 §10 참고. 정규화 레이어(`ingest/normalize.py`)로 흡수 완료, 10개 venue 검증 통과
 - **리뷰 추출 품질**: aspect 분류가 흔들리면 클러스터링 전체가 흔들림 → 파일럿 단계에서 수동 라벨 50건과 비교 검증
 - **Claude API 비용**: 수집 단계가 지배적. 파일럿에서 실측 후 전체 실행 여부 판단
+
+---
+
+## 10. OpenReview API 실측 결과 (2026-07-21 조사)
+
+기획 단계의 추정이 아니라 **실제 API를 호출해 확인한 사실**. 수집 파이프라인 구현의 근거.
+
+### 10.1 API 버전이 두 개로 갈린다
+
+2023년 전후로 OpenReview가 API를 교체했고, **구 venue는 v2에서 조회되지 않는다.**
+
+| venue | API | submission invitation | 논문 수 |
+|---|---|---|---|
+| ICLR 2020 | v1 | `-/Blind_Submission` | 2,213 |
+| ICLR 2021 | v1 | `-/Blind_Submission` | 2,594 |
+| ICLR 2022 | v1 | `-/Blind_Submission` | 2,617 |
+| ICLR 2023 | v1 | `-/Blind_Submission` | 3,792 |
+| ICLR 2024 | v2 | `-/Submission` | 7,404 |
+| ICLR 2025 | v2 | `-/Submission` | 11,672 |
+| NeurIPS 2021 | v1 | `-/Blind_Submission` | 2,768 |
+| NeurIPS 2022 | v1 | `-/Blind_Submission` | 2,824 |
+| NeurIPS 2023 | v2 | `-/Submission` | 3,395 |
+| NeurIPS 2024 | v2 | `-/Submission` | 4,236 |
+| **합계** | | | **43,515** |
+
+리뷰 추정 약 **15만 건** (편당 3.5건). v1은 `api.openreview.net`, v2는 `api2.openreview.net`.
+v2는 모든 content 필드를 `{"value": x}`로 감싸지만 v1은 raw 값 — 정규화 레이어에서 흡수.
+
+### 10.2 인증·요청 관련 함정 (전부 실측으로 확인)
+
+- **익명 `/notes` 요청은 403** (`ChallengeRequiredError`, 봇 검증) → **로그인 필수**. v1/v2 모두 동일
+- **`/login` 자체에 rate limit** 존재 → 토큰을 디스크에 캐시해 재사용 (`data/.token_*.json`, JWT `exp` 검사)
+- **v2는 `limit=1`이면 캐시 응답을 주고 `count` 필드를 생략** → 총 개수를 알려면 `limit>=3` + `offset` 명시
+- 공식 `openreview-py` 라이브러리는 의존성(`editdistance`)이 **Python 3.14 휠 미제공**으로 설치 실패 → raw REST로 직접 구현 (의존성도 가볍고 체크포인트 제어도 쉬움)
+
+### 10.3 리뷰 필드가 venue×연도마다 전부 다르다
+
+**이것이 최대 함정이었다.** 같은 ICLR인데도 연도마다 필드명·점수 형식이 바뀐다.
+
+| venue | 리뷰 본문 필드 | 점수 필드 | 강점/약점 분리 |
+|---|---|---|---|
+| ICLR 2020 | `review` | `rating` | ❌ 통짜 |
+| ICLR 2021 | `review` | `rating` | ❌ 통짜 |
+| ICLR 2022 | `main_review` | `recommendation` | ❌ 통짜 |
+| ICLR 2023 | `strength_and_weaknesses` | `recommendation` | △ 합쳐짐 |
+| ICLR 2024/2025 | `strengths` + `weaknesses` | `rating` | ✅ 분리 |
+| NeurIPS 2021 | `main_review` | `rating` | ❌ 통짜 |
+| NeurIPS 2022 | `strengths_and_weaknesses` | `rating` | △ 합쳐짐 |
+| NeurIPS 2023/2024 | `strengths` + `weaknesses` | `rating` | ✅ 분리 |
+
+**점수 형식도 제각각**: `"8: Accept"`, `"5"`, `"3: reject, not good enough"`, `"2 fair"` → 선두 숫자 파싱으로 통일.
+
+**설계에 미치는 영향**: 2024년 이후 venue는 `weaknesses` 필드만 LLM에 넘기면 되지만,
+그 이전은 리뷰 본문 전체를 넘겨 강점/약점부터 분리해야 한다. `NormalizedReview.needs_llm_split`
+플래그로 구분하고 `llm_input` 프로퍼티가 최소 토큰만 반환하도록 설계 → **LLM 비용 절감**.
+
+### 10.4 메타리뷰 위치도 다르다
+
+`Meta_Review` 노트가 **존재하는 venue는 ICLR 2024, NeurIPS 2022뿐**.
+나머지는 `Decision` 노트의 `comment` 필드(ICLR 2023은 `metareview:_summary,_strengths_and_weaknesses`)에 들어있다.
+→ 정규화 레이어에서 Meta_Review 노트 우선, 없으면 Decision 노트로 폴백.
+
+### 10.5 decision 판별
+
+`venue` 문자열(`"ICLR 2024 poster"`, `"Submitted to ICLR 2024"`)로 판별하는 게 1순위지만,
+**ICLR 2020/2021은 submission content에 `venue` 필드 자체가 없다** → `Decision` 노트 값으로 폴백.
+정규화 결과: `accept-oral` / `accept-spotlight` / `accept-poster` / `accept-notable` / `accept` /
+`reject` / `withdrawn` / `desk-reject` / `unknown`.
+
+### 10.6 검증 상태
+
+`scripts/verify_normalize.py`로 **10개 venue × 3편**을 실제 API에서 받아 정규화 검증 →
+title/abstract/decision/rating/리뷰본문/author_ids 전 항목 정상, 문제 0건.
+단위 테스트 9건(`tests/test_normalize.py`)이 각 연도 형식을 회귀 방지용으로 고정.
