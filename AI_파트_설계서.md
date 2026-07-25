@@ -303,7 +303,7 @@ LangGraph의 `astream()`을 그대로 노출하는 `analyze_stream()` 추가.
 1. ~~**주차 1 — 데이터 파일럿**~~ **(진행 중)**: OpenReview API 탐색 ✅, 정규화 레이어 + 10개 venue 검증 ✅ → 남은 것: 리뷰 추출 프롬프트 튜닝 + 편당 LLM 비용 측정 (Anthropic 키 필요)
 2. ~~**주차 2 — 검색 코어**~~ **✅ 완료** (§11, §12): SPECTER2 임베딩 + pgvector 적재 + 하이브리드 검색, 200편 end-to-end 검증 통과
 3. ~~**주차 3 — LangGraph 파이프라인**~~ **✅ 완료** (§14): 6개 노드 조립, 병렬 분석, $0 배선 검증. 남은 것: 재투고 매칭·PDF·Haiku 태깅 실측
-4. **주차 4 — 전체 수집**: 5년치 배치 실행 (체크포인트로 며칠에 걸쳐), 재투고 매칭
+4. **주차 4 — 전체 수집** *(진행 중)*: 43k 배치 실행(백그라운드, ~9h), ~~재투고 매칭~~ ✅(§15)
 5. **주차 5 — 마감**: PDF 입력, demo_server, Report 스키마 문서화 → 백엔드 팀 전달
 
 ---
@@ -582,6 +582,40 @@ similarity_percentile만** 담는다 (§11.2). JSON 직렬화 왕복 테스트 �
 
 ### 14.5 남은 것
 
-- **재투고 흐름**(resubmission_flows): `submission_links` 적재 로직 필요 (§6)
+- ~~**재투고 흐름**~~ **✅ 완료** (§15)
 - **PDF 입력**: `pdf/extract.py` (PyMuPDF + Haiku)
 - **similarity_tagging 실측**: 크레딧으로 Haiku 태깅 품질 확인 (아직 스텁만 검증)
+
+---
+
+## 15. 재투고 매칭 구현 (2026-07-22)
+
+### 15.1 폴백 체인 (`ingest/submission_linker.py`)
+
+| 순위 | 방법 | confidence | 상태 |
+|---|---|---|---|
+| 1 | arXiv ID 일치 | 1.00 | arxiv_id가 아직 전부 NULL(S2 보강 전) → **현재 no-op**, 채워지면 자동 활성화 |
+| 2 | 정규화 제목 정확 일치 | 0.95 | ✅ 작동 |
+| 3 | 제목 유사(pg_trgm ≥ 0.7) + 저자 Jaccard ≥ 0.5 | = 제목 유사도 | ✅ 작동 |
+
+- 제목 정규화: 소문자 + 영숫자 외 제거 + 공백 정리
+- 방향: `venue_sort_key`로 정렬 — 같은 해면 ICLR(상반기) < NeurIPS(하반기).
+  → "ICLR 2024 reject → NeurIPS 2024 accept" 흐름이 올바르게 생성됨
+- 전량 재계산(TRUNCATE + insert) 멱등. 전체 수집 완료 후 재실행하면 커버리지 상승
+- 결과는 `venue_trend_node`가 유사 논문 집합에 대해 집계 → `Report.resubmission_flows`
+
+### 15.2 검증
+
+부분 데이터(ICLR 2020/2021)에서 실제 재투고 정확히 포착:
+**"Towards Finding Longer Proofs" ICLR 2020 reject → ICLR 2021 reject** (title_exact, 0.95).
+NeurIPS venue 적재 후 ICLR↔NeurIPS 흐름이 다수 잡힐 것으로 예상.
+
+### 15.3 psycopg 함정 (실측)
+
+- `set_limit(0.7)` → `set_limit(0.7::real)` 캐스트 필요 (double precision 거부)
+- trgm `%` 연산자는 SQL에서 `%%`로 쓰되 **빈 파라미터 `()`를 넘겨야** psycopg가 축약
+
+### 15.4 NUL 바이트 (수집 중 발견)
+
+일부 논문 초록/리뷰에 NUL(0x00) 바이트 → Postgres text 컬럼이 거부(ICLR 2021에서 발생).
+`normalize.clean_text()`가 제어 문자를 제거(탭·개행 보존)하도록 수정. 수집 재개.

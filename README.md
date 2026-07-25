@@ -114,6 +114,7 @@ paper_assistant/
 │   ├── openreview_client.py   # v1/v2 분기 + 토큰 캐시 + 페이지네이션 + 백오프
 │   ├── normalize.py           # venue×연도별 필드 차이 → 단일 스키마
 │   ├── review_extractor.py    # 휴리스틱 지적항목 추출($0) / Haiku(플레이스홀더)
+│   ├── submission_linker.py   # 재투고 매칭 (arXiv→제목→제목+저자)
 │   ├── run_pilot.py           # ICLR 2024 파일럿
 │   └── run_ingest.py          # 전체 43k 수집·적재 (멱등 재개)
 ├── embedding/

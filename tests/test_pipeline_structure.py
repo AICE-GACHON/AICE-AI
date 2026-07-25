@@ -7,7 +7,8 @@ DB가 필요한 노드는 별도 통합 테스트(test_db_integration 계열)에
 from paper_assistant.graph import nodes
 from paper_assistant.graph.state import PipelineState
 from paper_assistant.retrieval.hybrid_search import SearchResult
-from paper_assistant.schemas import Report, ReviewPattern, VenueTrend
+from paper_assistant.schemas import (
+    Report, ResubmissionFlow, ReviewPattern, VenueTrend)
 
 
 def _fake_paper(pid, title, decision="reject", pct=90.0):
@@ -36,6 +37,8 @@ def test_synthesis_assembles_report_without_llm():
             paper_count=2, total_papers=2, examples=["x"])],
         "venue_trends": [VenueTrend(venue="ICLR 2024", paper_count=2,
                                     accept_count=1, accept_rate=0.5)],
+        "resubmission_flows": [ResubmissionFlow(
+            from_venue="ICLR 2024", to_venue="NeurIPS 2024", count=3)],
     }
     out = nodes.synthesis_node(state, embedder=None, llm=None)
     report = out["report"]
@@ -44,6 +47,8 @@ def test_synthesis_assembles_report_without_llm():
     assert report.similar_papers[0].rank == 1
     assert report.similar_papers[0].similarity_percentile == 90.0
     assert report.review_patterns[0].aspect == "baselines"
+    assert report.resubmission_flows[0].from_venue == "ICLR 2024"
+    assert report.resubmission_flows[0].count == 3
     assert "유사 논문 2편" in report.summary_markdown
 
 

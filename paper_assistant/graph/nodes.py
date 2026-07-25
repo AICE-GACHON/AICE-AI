@@ -14,7 +14,8 @@ from paper_assistant.graph.llm import HAIKU, SONNET
 from paper_assistant.graph.state import PipelineState
 from paper_assistant.retrieval.hybrid_search import hybrid_search
 from paper_assistant.schemas import (
-    Report, ReviewPattern, SimilarityTag, SimilarPaper, VenueTrend)
+    Report, ResubmissionFlow, ReviewPattern, SimilarityTag, SimilarPaper,
+    VenueTrend)
 
 log = logging.getLogger(__name__)
 
@@ -113,8 +114,21 @@ def venue_trend_node(state: PipelineState, embedder, llm) -> dict:
         trends = [VenueTrend(venue=r[0], paper_count=r[1], accept_count=r[2],
                              accept_rate=round(r[2] / r[1], 3) if r[1] else 0.0)
                   for r in cur.fetchall()]
-    # 재투고 흐름은 submission_links 적재 후 연결 (별도 단계)
-    return {"venue_trends": trends}
+
+        # 재투고 흐름: 유사 논문이 한쪽 끝인 링크를 venue쌍으로 집계
+        cur.execute(
+            """
+            SELECT e.venue AS from_v, l.venue AS to_v, count(*) AS n
+            FROM submission_links sl
+            JOIN papers e ON e.id = sl.earlier_paper_id
+            JOIN papers l ON l.id = sl.later_paper_id
+            WHERE sl.earlier_paper_id = ANY(%s) OR sl.later_paper_id = ANY(%s)
+            GROUP BY e.venue, l.venue ORDER BY n DESC
+            """,
+            (paper_ids, paper_ids))
+        flows = [ResubmissionFlow(from_venue=r[0], to_venue=r[1], count=r[2])
+                 for r in cur.fetchall()]
+    return {"venue_trends": trends, "resubmission_flows": flows}
 
 
 # ---------------------------------------------------- synthesis (LLM)
@@ -140,6 +154,7 @@ def synthesis_node(state: PipelineState, embedder, llm) -> dict:
         similar_papers=similar,
         review_patterns=patterns,
         venue_trends=trends,
+        resubmission_flows=state.get("resubmission_flows", []),
         summary_markdown=_summary(state, similar, patterns, trends, llm),
     )
     return {"report": report}

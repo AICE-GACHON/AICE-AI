@@ -7,7 +7,7 @@ from typing import TypedDict
 
 from paper_assistant.retrieval.hybrid_search import SearchResult
 from paper_assistant.schemas import (
-    Report, ReviewPattern, SimilarityTag, VenueTrend)
+    Report, ResubmissionFlow, ReviewPattern, SimilarityTag, VenueTrend)
 
 
 class PipelineState(TypedDict, total=False):
@@ -24,6 +24,7 @@ class PipelineState(TypedDict, total=False):
     similarity_tags: dict[int, list[SimilarityTag]]   # paper_id -> tags
     review_patterns: list[ReviewPattern]
     venue_trends: list[VenueTrend]
+    resubmission_flows: list[ResubmissionFlow]
 
     # --- 종합 (synthesis_node) ---
     report: Report

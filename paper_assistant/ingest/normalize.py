@@ -40,6 +40,17 @@ _ACCEPT_PATTERNS = [
 ]
 
 
+def clean_text(s: str) -> str:
+    """NUL(0x00) 및 기타 제어 문자 제거.
+
+    일부 논문 초록·리뷰에 NUL 바이트가 섞여 있어 Postgres text 컬럼이 거부한다
+    (실측: ICLR 2021). 탭·개행은 보존하고 나머지 제어 문자만 제거한다.
+    """
+    if not s:
+        return s
+    return "".join(c for c in s if c == "\t" or c == "\n" or ord(c) >= 0x20)
+
+
 def unwrap(value):
     """API v2는 모든 content 필드를 {'value': x}로 감싼다. v1은 raw."""
     if isinstance(value, dict) and "value" in value:
@@ -52,7 +63,7 @@ def get_field(content: dict, names: list[str]) -> str:
         if name in content:
             val = unwrap(content[name])
             if isinstance(val, str) and val.strip():
-                return val.strip()
+                return clean_text(val.strip())
     return ""
 
 
@@ -153,7 +164,7 @@ def normalize_review(note: dict) -> NormalizedReview:
     rating_raw = ""
     for f in RATING_FIELDS:
         if f in c:
-            rating_raw = str(unwrap(c[f]))
+            rating_raw = clean_text(str(unwrap(c[f])))
             break
 
     return NormalizedReview(
@@ -195,18 +206,23 @@ def normalize_paper(submission: dict, replies: list[dict],
 
     meta_review = meta_review or decision_meta
 
-    keywords = unwrap(c.get("keywords")) or []
-    authors = unwrap(c.get("authors")) or []
-    author_ids = unwrap(c.get("authorids")) or []
+    def _clean_list(v):
+        if not isinstance(v, list):
+            return []
+        return [clean_text(x) if isinstance(x, str) else x for x in v]
+
+    keywords = _clean_list(unwrap(c.get("keywords")) or [])
+    authors = _clean_list(unwrap(c.get("authors")) or [])
+    author_ids = _clean_list(unwrap(c.get("authorids")) or [])
 
     return NormalizedPaper(
         openreview_id=submission.get("id", ""),
         forum_id=submission.get("forum", ""),
         title=get_field(c, ["title"]),
         abstract=get_field(c, ["abstract"]),
-        keywords=keywords if isinstance(keywords, list) else [],
-        authors=authors if isinstance(authors, list) else [],
-        author_ids=author_ids if isinstance(author_ids, list) else [],
+        keywords=keywords,
+        authors=authors,
+        author_ids=author_ids,
         venue=venue_name,
         year=year,
         decision=normalize_decision(get_field(c, ["venue"]), decision_str),

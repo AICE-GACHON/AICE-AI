@@ -1,6 +1,20 @@
 """정규화 레이어 단위 테스트 (실제 API 응답 형태를 축약해 재현)."""
 from paper_assistant.ingest.normalize import (
-    normalize_decision, normalize_paper, normalize_review, parse_score)
+    clean_text, normalize_decision, normalize_paper, normalize_review, parse_score)
+
+
+def test_clean_text_strips_nul_and_control_chars():
+    # Postgres text는 NUL을 거부한다 (실측 ICLR 2021)
+    assert clean_text("ab\x00cd") == "abcd"
+    assert clean_text("x\x07y") == "xy"          # BEL 등 제어문자 제거
+    assert clean_text("line1\nline2\ttab") == "line1\nline2\ttab"  # 탭·개행 보존
+    assert clean_text("") == ""
+    assert clean_text("정상 텍스트") == "정상 텍스트"       # 유니코드 보존
+
+
+def test_get_field_cleans_nul():
+    from paper_assistant.ingest.normalize import get_field
+    assert get_field({"title": {"value": "Hel\x00lo"}}, ["title"]) == "Hello"
 
 
 def test_parse_score_handles_all_observed_formats():
