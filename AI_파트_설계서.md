@@ -302,7 +302,7 @@ LangGraph의 `astream()`을 그대로 노출하는 `analyze_stream()` 추가.
 
 1. ~~**주차 1 — 데이터 파일럿**~~ **(진행 중)**: OpenReview API 탐색 ✅, 정규화 레이어 + 10개 venue 검증 ✅ → 남은 것: 리뷰 추출 프롬프트 튜닝 + 편당 LLM 비용 측정 (Anthropic 키 필요)
 2. ~~**주차 2 — 검색 코어**~~ **✅ 완료** (§11, §12): SPECTER2 임베딩 + pgvector 적재 + 하이브리드 검색, 200편 end-to-end 검증 통과
-3. **주차 3 — LangGraph 파이프라인**: 6개 노드 조립, synthesis 리포트 품질 튜닝
+3. ~~**주차 3 — LangGraph 파이프라인**~~ **✅ 완료** (§14): 6개 노드 조립, 병렬 분석, $0 배선 검증. 남은 것: 재투고 매칭·PDF·Haiku 태깅 실측
 4. **주차 4 — 전체 수집**: 5년치 배치 실행 (체크포인트로 며칠에 걸쳐), 재투고 매칭
 5. **주차 5 — 마감**: PDF 입력, demo_server, Report 스키마 문서화 → 백엔드 팀 전달
 
@@ -527,3 +527,61 @@ docker compose up -d      # 최초 기동 시 scripts/init_db.sql 자동 실행
    (쿼리당 ~$0.05 → 약 90~100회 데모 가능)
 
 풀스케일 Haiku 추출($100)은 예산 확보 시 Batch로 하룻밤 실행하는 향후 과제로 남긴다.
+
+---
+
+## 14. LangGraph 파이프라인 구현 결과 (2026-07-22)
+
+### 14.1 구조
+
+설계 §2.2의 고정 DAG를 LangGraph로 구현. supervisor 없음.
+
+```
+input → retrieval → ┬ similarity_tagging (Haiku) ┐
+                    ├ review_analysis   (no LLM) ┼→ synthesis (Sonnet) → END
+                    └ venue_trend       (no LLM) ┘
+```
+
+검색 이후 3개 분석 노드가 **병렬**, synthesis는 fan-in. 200편 파일럿에서
+end-to-end 정상 작동 확인.
+
+### 14.2 예산 안전장치: LLM 토글
+
+`get_llm(enabled=False)`(기본)면 태깅·종합 노드가 **결정론적 스텁**을 만든다.
+→ 크레딧 0원으로 DAG 배선·스키마를 전부 검증 가능. 데모 때만
+`PAPER_ASSISTANT_USE_LLM=1`로 실제 Claude(Haiku/Sonnet) 호출.
+
+### 14.3 ⚠️ SPECTER2는 리뷰 문장 클러스터링에 부적합 (설계 변경)
+
+설계 §4는 지적항목을 임베딩→클러스터링하려 했으나, **SPECTER2로 짧은 리뷰
+문장을 임베딩하니 유사도가 평균 0.872에 압축**된다 (논문 title+abstract용
+모델이라 짧은 문장을 변별 못 함). 실측: ICLR 2020 지적항목 400개, 무작위 쌍
+유사도 50분위 0.873 / 95분위 0.925. **임계값 0.80에서도 17편이 한 클러스터로 뭉침** →
+클러스터링 무의미.
+
+**대응**: 임베딩 클러스터링 대신 **키워드 aspect 기반 집계**를 1차 방법으로 채택.
+`review_analysis_node`는 지적항목을 aspect별로 묶어 "20편 중 12편이 명확성 지적,
+12편 baselines, 10편 신규성 지적" 형태로 집계한다. 장점:
+
+- **쿼리 시점 임베딩 불필요** → 더 빠르고 단순 (§13에서 리뷰 임베딩을 미룬 결정과 부합)
+- 해석 가능하고 정직 (임베딩 클러스터의 애매한 medoid 라벨보다 명확)
+- `HeuristicExtractor`의 aspect 68% other여도, 나머지 32%가 깔끔한 패턴을 만듦
+
+`clustering.py._greedy_cluster`는 범용 유틸로 남겨둠 (향후 aspect 내부 세분화 등).
+
+### 14.4 백엔드 통합 계약 확정
+
+```python
+from paper_assistant import analyze
+report = analyze(title, abstract, pdf_bytes=None) -> Report   # Pydantic
+```
+
+`Report`(`schemas.py`)는 similar_papers / review_patterns / venue_trends /
+resubmission_flows / summary_markdown로 구성. **원시 코사인은 담지 않고
+similarity_percentile만** 담는다 (§11.2). JSON 직렬화 왕복 테스트 통과.
+
+### 14.5 남은 것
+
+- **재투고 흐름**(resubmission_flows): `submission_links` 적재 로직 필요 (§6)
+- **PDF 입력**: `pdf/extract.py` (PyMuPDF + Haiku)
+- **similarity_tagging 실측**: 크레딧으로 Haiku 태깅 품질 확인 (아직 스텁만 검증)

@@ -80,24 +80,57 @@ results = hybrid_search(query_vector, f"{title} {abstract}", top_k=20)
 묶어서 긴 초록을 넣으면 거의 매칭되지 않는다 (실측 200편 중 1편). 자세한 내용은
 [AI_파트_설계서.md](AI_파트_설계서.md) §5.
 
+## 분석 파이프라인 (LangGraph)
+
+공개 진입점은 함수 하나 — **백엔드 통합 계약**:
+
+```python
+from paper_assistant import analyze
+report = analyze(title, abstract)          # -> Report (Pydantic)
+```
+
+고정 DAG: `input → retrieval → (유사성 태깅 ‖ 리뷰 분석 ‖ 게재 경향) → 종합`.
+검색 이후 3개 분석이 병렬. supervisor 없음.
+
+**예산 안전장치**: 기본은 LLM off(`$0`) — 태깅·종합이 스텁으로 동작해 배선을
+검증할 수 있다. 데모 때만 실제 Claude 호출:
+
+```bash
+python scripts/verify_pipeline.py           # $0, 스텁
+PAPER_ASSISTANT_USE_LLM=1 python ...        # Haiku 태깅 + Sonnet 종합
+```
+
+리뷰 패턴은 **키워드 aspect 집계**로 만든다("20편 중 12편 baselines 지적").
+SPECTER2가 짧은 리뷰 문장 클러스터링에 부적합해서다 — [설계서 §14](AI_파트_설계서.md) 참고.
+
 ## 구조
 
 ```
 paper_assistant/
+├── __init__.py                # 공개 API: analyze()
 ├── config.py                  # .env 로드, DATABASE_URL
+├── schemas.py                 # Report 등 Pydantic (백엔드 계약)
 ├── ingest/
 │   ├── openreview_client.py   # v1/v2 분기 + 토큰 캐시 + 페이지네이션 + 백오프
 │   ├── normalize.py           # venue×연도별 필드 차이 → 단일 스키마
-│   └── run_pilot.py           # ICLR 2024 파일럿 수집
+│   ├── review_extractor.py    # 휴리스틱 지적항목 추출($0) / Haiku(플레이스홀더)
+│   ├── run_pilot.py           # ICLR 2024 파일럿
+│   └── run_ingest.py          # 전체 43k 수집·적재 (멱등 재개)
 ├── embedding/
 │   └── specter2.py            # SPECTER2 임베딩 + 코사인→백분위 변환
 ├── db/
 │   ├── connection.py          # 커넥션 풀
-│   └── load.py                # upsert 적재 + 수집 체크포인트
-└── retrieval/
-    └── hybrid_search.py       # 벡터 + full-text, RRF 결합
+│   └── load.py                # upsert 적재 + review_points + 체크포인트
+├── retrieval/
+│   └── hybrid_search.py       # 벡터 + full-text, RRF 결합
+└── graph/                     # LangGraph 파이프라인
+    ├── state.py               # 공유 상태 (TypedDict)
+    ├── llm.py                 # Claude 래퍼 (토글 가능)
+    ├── clustering.py          # aspect 집계 + 범용 클러스터 유틸
+    ├── nodes.py               # 6개 노드
+    └── pipeline.py            # DAG 조립 + analyze()
 scripts/                       # 조사·검증용 + init_db.sql / build_indexes.sql
-tests/                         # 회귀 테스트 25건
+tests/                         # 회귀 테스트 47건
 ```
 
 **전체 적재를 마친 뒤** 벡터 인덱스를 생성할 것 (빈 테이블에 미리 만들면 적재가 느려진다):
