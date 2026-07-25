@@ -67,9 +67,9 @@ ML/AI 분야 연구자를 위한 RAG 기반 웹 서비스. 유사 논문을 검�
 ## 6. 데이터 소스 및 기술 스택 (초안)
 
 **데이터 소스**
-- OpenReview API — 리뷰, 메타리뷰, rebuttal, 최종 decision
-- Semantic Scholar API — 논문 메타데이터, 인용 관계, venue 정보
-- arXiv API — 초록, 원문, 카테고리
+OpenReview: venue×연도 단위로 논문 본문, 리뷰, 메타리뷰, rebuttal, decision 수집 (핵심 데이터 소스)
+Semantic Scholar: 여기서 부족한 부분을 보강 — 논문 메타데이터, 인용 관계, 저자 ID, venue 정보
+arXiv: arXiv ID 매칭, 초록/카테고리 보강
 
 **기술 스택 (제안)**
 - 임베딩/검색: 논문 임베딩(예: SPECTER2 등 학술 특화 임베딩) + 벡터 DB (Pinecone, Weaviate, pgvector 등)

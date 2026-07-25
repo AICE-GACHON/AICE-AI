@@ -96,6 +96,41 @@ def upsert_reviews(cur, paper_id: int, paper: NormalizedPaper) -> int:
     return len(paper.reviews)
 
 
+def load_review_points(review_openreview_id: str, points, embeddings=None) -> int:
+    """한 리뷰의 지적 항목을 적재. 재실행 시 기존 항목을 지우고 새로 넣는다.
+
+    points: ExtractedPoint 리스트
+    embeddings: 각 point의 벡터 (None이면 임베딩 없이 저장)
+    """
+    if not points:
+        return 0
+    with cursor(commit=True) as cur:
+        cur.execute(
+            "SELECT id, paper_id FROM reviews WHERE openreview_id = %s",
+            (review_openreview_id,))
+        row = cur.fetchone()
+        if not row:
+            return 0
+        review_id, paper_id = row
+
+        # 멱등성: 이 리뷰의 기존 지적 항목을 먼저 삭제
+        cur.execute("DELETE FROM review_points WHERE review_id = %s", (review_id,))
+
+        for i, p in enumerate(points):
+            emb = embeddings[i] if embeddings is not None else None
+            cur.execute(
+                """
+                INSERT INTO review_points
+                    (review_id, paper_id, aspect, sentiment, text, embedding)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (review_id, paper_id, p.aspect, p.sentiment, p.text, emb),
+            )
+        cur.execute(
+            "UPDATE reviews SET points_extracted = true WHERE id = %s", (review_id,))
+    return len(points)
+
+
 def load_papers(papers: list[NormalizedPaper], embeddings=None) -> tuple[int, int]:
     """논문 + 저자 + 리뷰를 한 트랜잭션으로 적재. (논문 수, 리뷰 수) 반환."""
     n_reviews = 0
