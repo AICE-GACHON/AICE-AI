@@ -45,6 +45,7 @@ python scripts/verify_normalize.py              # 10개 venue 정규화 검증
 python scripts/verify_embedding.py              # SPECTER2 차원·품질·속도 검증
 python scripts/load_pilot.py 200                # 수집→임베딩→적재→검색 end-to-end
 python scripts/build_base_rates.py              # 코퍼스 aspect base rate 계산 (수집 후 1회)
+python scripts/build_venue_stats.py             # venue별 rating 기준선·당락 경계 (수집 후 1회)
 pytest tests/                                   # 회귀 테스트 (DB 없으면 통합 테스트만 skip)
 ```
 
@@ -120,6 +121,27 @@ python scripts/build_base_rates.py
 
 이 테이블이 비어 있으면 lift 없이 예전처럼 빈도순으로 폴백한다(경고 로그).
 
+## 리뷰 점수 (rating)
+
+`reviews.rating`은 168,217건 100% 커버리지이고 당락을 가장 잘 가르는 신호다
+(코퍼스 accept 평균 6.24 vs reject 4.71). 다만 **원점수를 단독으로 노출하지 말 것**:
+
+- 척도가 다르다 — ICLR 2020은 **1~8**, 나머지는 1~10
+- venue별 평균이 다르다 — ICLR 2025 5.15 vs NeurIPS 2021 6.31
+
+`venue_stats`를 기준선으로 두고 `rating_vs_venue` / `rating_vs_threshold`처럼
+**상대값으로만** 전달한다. 당락 경계는 실측으로 뚜렷하다 — ICLR 2025 기준 평균
+5.5는 통과율 20%, 6.0은 66%.
+
+```bash
+python scripts/build_venue_stats.py
+```
+
+⚠️ **NeurIPS accept율을 실제 채택률로 쓰지 말 것.** OpenReview가 NeurIPS는 채택
+논문 위주로만 공개해서 **코퍼스의 95%가 accept**다(실제는 ~25%). `is_coverage_biased`
+가 선 venue는 당락 경계를 추정하지 않고, accept율도 절대값 대신 `accept_lift`
+(그 학회 자신의 코퍼스 대비)로만 말한다 — [§19](AI_파트_설계서.md) 참고.
+
 ## 구조
 
 ```
@@ -145,12 +167,15 @@ paper_assistant/
     ├── state.py               # 공유 상태 (TypedDict)
     ├── llm.py                 # Claude 래퍼 (토글 가능)
     ├── base_rates.py          # 코퍼스 aspect base rate 조회 (lift 분모)
+    ├── venue_stats.py         # venue별 rating 기준선·당락 경계·표본 편향
+    ├── ratings.py             # 리뷰 점수 집계 (venue 상대값 환산)
     ├── clustering.py          # aspect 집계 + lift/Fisher 검정 + 범용 클러스터 유틸
     ├── nodes.py               # 6개 노드
     └── pipeline.py            # DAG 조립 + analyze()
 scripts/                       # 조사·검증용 + init_db.sql / build_indexes.sql
-                               #   + build_base_rates.py (lift 분모 사전 계산)
-tests/                         # 회귀 테스트 72건
+                               #   + build_base_rates.py / build_venue_stats.py
+                               #     (lift 분모·rating 기준선 사전 계산)
+tests/                         # 회귀 테스트 84건
 ```
 
 **전체 적재를 마친 뒤** 벡터 인덱스를 생성할 것 (빈 테이블에 미리 만들면 적재가 느려진다):

@@ -122,6 +122,29 @@ CREATE TABLE aspect_base_rates (
     PRIMARY KEY (aspect, sentiment)
 );
 
+-- ----------------------------------------------------------- venue_stats
+-- venue별 rating 기준선과 당락 경계. 원점수는 척도가 venue마다 달라(ICLR 2020은
+-- 1~8) 단독으로 보여줄 수 없고, 항상 이 기준선 대비로 환산한다 (설계서 §19).
+-- is_coverage_biased: NeurIPS는 코퍼스의 95%가 accept다 — OpenReview가 채택 논문
+-- 위주로만 공개하기 때문이며 실제 채택률(~25%)이 아니다. 이 플래그가 선 venue는
+-- accept율 절대값과 당락 경계를 신뢰하지 않는다.
+-- 수집 완료 후 scripts/build_venue_stats.py로 채운다.
+CREATE TABLE venue_stats (
+    venue               TEXT PRIMARY KEY,
+    papers              BIGINT NOT NULL,
+    accept_count        BIGINT NOT NULL,
+    reject_count        BIGINT NOT NULL,
+    accept_rate         REAL   NOT NULL,
+    rating_mean         REAL,
+    rating_sd           REAL,
+    accept_rating_mean  REAL,
+    reject_rating_mean  REAL,
+    scale_max           REAL,             -- 관측된 최대 점수 (척도 구분용)
+    threshold_50        REAL,             -- 통과율 50%를 넘기는 최저 평균 rating
+    is_coverage_biased  BOOLEAN NOT NULL DEFAULT false,
+    computed_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- ------------------------------------------------------------- citations
 -- 그래프 DB 대신 단순 엣지 테이블. 다중 홉 순회 기능이 없어 이것으로 충분하다.
 CREATE TABLE citations (

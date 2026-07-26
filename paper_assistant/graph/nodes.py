@@ -12,7 +12,9 @@ from paper_assistant.db.connection import cursor
 from paper_assistant.graph.base_rates import load_base_rates
 from paper_assistant.graph.clustering import aggregate_by_aspect
 from paper_assistant.graph.llm import HAIKU, SONNET
+from paper_assistant.graph.ratings import attach_paper_ratings, build_rating_context
 from paper_assistant.graph.state import PipelineState
+from paper_assistant.graph.venue_stats import conference_of, load_venue_stats
 from paper_assistant.retrieval.hybrid_search import hybrid_search
 from paper_assistant.schemas import (
     Report, ResubmissionFlow, ReviewPattern, SimilarityTag, SimilarPaper,
@@ -105,11 +107,15 @@ def review_analysis_node(state: PipelineState, embedder, llm) -> dict:
 
 # --------------------------------------------------- venue trend (no LLM)
 def venue_trend_node(state: PipelineState, embedder, llm) -> dict:
-    """유사 논문들의 게재 결과를 SQL 집계."""
+    """유사 논문들의 게재 결과 + 리뷰 점수를 SQL 집계.
+
+    accept율은 코퍼스 기준선과 함께 낸다 — NeurIPS는 코퍼스의 95%가 accept라
+    절대값이 실제 채택률처럼 읽히면 안 된다 (§19).
+    """
     papers = state.get("similar_papers", [])
     paper_ids = [p.paper_id for p in papers]
     if not paper_ids:
-        return {"venue_trends": []}
+        return {"venue_trends": [], "paper_ratings": {}}
 
     with cursor() as cur:
         # 학회 단위(ICLR/NeurIPS)로 집계 — 연도별로 쪼개면 셀당 표본이 1~3편이라
@@ -127,6 +133,18 @@ def venue_trend_node(state: PipelineState, embedder, llm) -> dict:
                              accept_rate=round(r[2] / r[1], 3) if r[1] else 0.0)
                   for r in cur.fetchall()]
 
+        # 논문별 리뷰 점수 (평균·개수·최고최저차). 168,217건 전부 rating 보유.
+        cur.execute(
+            """
+            SELECT paper_id, avg(rating), count(*), max(rating) - min(rating)
+            FROM reviews WHERE paper_id = ANY(%s) AND rating IS NOT NULL
+            GROUP BY paper_id
+            """,
+            (paper_ids,))
+        ratings = {r[0]: {"avg": float(r[1]), "count": r[2],
+                          "spread": float(r[3]) if r[3] is not None else None}
+                   for r in cur.fetchall()}
+
         # 재투고 흐름: 유사 논문이 한쪽 끝인 링크를 venue쌍으로 집계
         cur.execute(
             """
@@ -140,7 +158,33 @@ def venue_trend_node(state: PipelineState, embedder, llm) -> dict:
             (paper_ids, paper_ids))
         flows = [ResubmissionFlow(from_venue=r[0], to_venue=r[1], count=r[2])
                  for r in cur.fetchall()]
-    return {"venue_trends": trends, "resubmission_flows": flows}
+
+    _attach_venue_baselines(trends)
+    return {"venue_trends": trends, "resubmission_flows": flows,
+            "paper_ratings": ratings}
+
+
+def _attach_venue_baselines(trends: list[VenueTrend]) -> None:
+    """학회 단위 accept율에 코퍼스 기준선과 편향 플래그를 붙인다.
+
+    trends는 학회 단위(ICLR/NeurIPS)인데 venue_stats는 venue×연도 단위라,
+    학회에 속한 연도들을 논문 수 가중으로 합쳐 기준선을 만든다.
+    """
+    stats = load_venue_stats()
+    if not stats:
+        return
+    for t in trends:
+        members = [s for v, s in stats.items() if conference_of(v) == t.venue]
+        if not members:
+            continue
+        total = sum(s.papers for s in members)
+        if not total:
+            continue
+        t.corpus_accept_rate = round(
+            sum(s.accept_rate * s.papers for s in members) / total, 3)
+        if t.corpus_accept_rate:
+            t.accept_lift = round(t.accept_rate / t.corpus_accept_rate, 2)
+        t.is_coverage_biased = any(s.is_coverage_biased for s in members)
 
 
 # ---------------------------------------------------- synthesis (LLM)
@@ -151,14 +195,20 @@ def synthesis_node(state: PipelineState, embedder, llm) -> dict:
     patterns = state.get("review_patterns", [])
     trends = state.get("venue_trends", [])
 
-    similar = [
-        SimilarPaper(
+    ratings = state.get("paper_ratings", {})
+    venue_stats = load_venue_stats()
+
+    similar = []
+    for i, p in enumerate(papers):
+        sp = SimilarPaper(
             paper_id=p.paper_id, openreview_id=p.openreview_id, title=p.title,
             venue=p.venue, year=p.year, decision=p.decision,
             similarity_percentile=round(p.similarity_percentile or 0.0, 1),
             rank=i + 1, tags=tags.get(p.paper_id, []))
-        for i, p in enumerate(papers)
-    ]
+        attach_paper_ratings(sp, venue_stats.get(p.venue), ratings.get(p.paper_id))
+        similar.append(sp)
+
+    rating_context = build_rating_context(papers, ratings, venue_stats)
 
     report = Report(
         query_title=state["query_title"],
@@ -166,8 +216,10 @@ def synthesis_node(state: PipelineState, embedder, llm) -> dict:
         similar_papers=similar,
         review_patterns=patterns,
         venue_trends=trends,
+        rating_context=rating_context,
         resubmission_flows=state.get("resubmission_flows", []),
-        summary_markdown=_summary(state, similar, patterns, trends, llm),
+        summary_markdown=_summary(state, similar, patterns, trends,
+                                  rating_context, llm),
     )
     return {"report": report}
 
@@ -185,9 +237,29 @@ def _risky_first(patterns, significant_only: bool = True):
     return sorted(scored, key=lambda kv: kv[1], reverse=True)
 
 
-def _summary(state, similar, patterns, trends, llm) -> str:
+def _rating_lines(rc) -> list[str]:
+    """rating 맥락을 사람이 읽는 줄로. 편향 venue는 반드시 경고를 단다."""
+    if not rc or not rc.rated_papers:
+        return []
+    lines = [f"- 이웃 평균 점수 {rc.neighbor_mean} ({rc.rated_papers}편)"]
+    if rc.accepted_mean is not None and rc.rejected_mean is not None:
+        lines[-1] += f" — 통과 {rc.accepted_mean} vs 탈락 {rc.rejected_mean}"
+    if rc.threshold is not None:
+        lines.append(f"- 당락 경계: {rc.threshold_venue} 기준 평균 "
+                     f"{rc.threshold} 이상이면 통과율 50% 초과")
+    if rc.split_papers:
+        lines.append(f"- 리뷰어 의견이 갈린 논문 {len(rc.split_papers)}편: "
+                     f"{rc.split_papers[0][:50]}")
+    if rc.biased_venues:
+        lines.append(f"- ⚠️ {', '.join(rc.biased_venues)}는 채택 논문 위주로만 "
+                     f"공개되어 accept율을 실제 채택률로 읽으면 안 됨")
+    return lines
+
+
+def _summary(state, similar, patterns, trends, rating_context, llm) -> str:
     distinctive = [p for p in patterns if p.is_distinctive]
     risky = _risky_first(patterns)
+    rc = rating_context
 
     if llm is None:
         # 스텁: 구조화 데이터로 결정론적 요약
@@ -207,9 +279,12 @@ def _summary(state, similar, patterns, trends, llm) -> str:
                 f"({p.accept_rate_without*100:.0f}%), p={p.contrast_p_value}")
         else:
             lines.append("- 당락 격차가 유의한 지적 없음 (이웃 표본이 작아 판단 보류)")
+        lines += _rating_lines(rc)
         if trends:
             lines.append("- 게재 경향: " + ", ".join(
-                f"{t.venue} {t.accept_count}/{t.paper_count}" for t in trends[:3]))
+                f"{t.venue} {t.accept_count}/{t.paper_count}"
+                + (" (표본 편향)" if t.is_coverage_biased else "")
+                for t in trends[:3]))
         return "\n".join(lines)
 
     facts = {
@@ -229,8 +304,23 @@ def _summary(state, similar, patterns, trends, llm) -> str:
             "contrast_sample": f"{p.decided_with} vs {p.decided_without}",
             "contrast_significant": p.is_contrast_significant,
         } for p in patterns],
-        "venue_trends": [{"venue": t.venue, "accept": f"{t.accept_count}/{t.paper_count}"}
-                         for t in trends],
+        "venue_trends": [{
+            "venue": t.venue,
+            "accept": f"{t.accept_count}/{t.paper_count}",
+            "corpus_accept_rate": t.corpus_accept_rate,
+            "accept_lift": t.accept_lift,
+            "coverage_biased": t.is_coverage_biased,
+        } for t in trends],
+        "ratings": {
+            "neighbor_mean": rc.neighbor_mean,
+            "accepted_mean": rc.accepted_mean,
+            "rejected_mean": rc.rejected_mean,
+            "rated_papers": rc.rated_papers,
+            "accept_threshold": rc.threshold,
+            "threshold_venue": rc.threshold_venue,
+            "reviewer_split_papers": rc.split_papers,
+            "coverage_biased_venues": rc.biased_venues,
+        } if rc and rc.rated_papers else None,
     }
     system = (
         "You are a research assistant. Given structured findings about papers similar "
@@ -244,6 +334,14 @@ def _summary(state, similar, patterns, trends, llm) -> str:
         "Only state an accept-rate gap as a conclusion when contrast_significant is true; "
         "otherwise the sample is too small — mention it as tentative or omit it. "
         "If nothing is distinctive, say so plainly rather than manufacturing an "
-        "insight. Do not invent facts.")
+        "insight.\n"
+        "Review scores: state the neighborhood mean and, when accept_threshold is "
+        "given, what score this topic needs to clear. Never compare raw scores "
+        "across different venues — the scales differ.\n"
+        "Any venue in coverage_biased_venues publishes reviews mainly for ACCEPTED "
+        "papers, so its accept rate is a sampling artifact, not a real acceptance "
+        "rate — never tell the user that venue is easier to get into. Use accept_lift "
+        "(neighborhood vs that venue's own corpus) for relative statements instead. "
+        "Do not invent facts.")
     return llm.text(SONNET, system, json.dumps(facts, ensure_ascii=False),
                     max_tokens=1200)

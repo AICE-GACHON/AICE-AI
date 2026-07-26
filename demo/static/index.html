@@ -51,6 +51,10 @@
   .ex b { color:var(--ink); }
   .ex.risk { color:var(--reject); }
   .star { color:var(--accent); }
+  .split { display:inline-block; font-size:11px; padding:1px 6px; border-radius:9px;
+           background:#fdf0e3; color:#a35b12; margin-left:4px; }
+  .warn { margin-top:10px; padding:9px 11px; border-radius:8px; font-size:13px;
+          background:#fdf0e3; color:#8a4d10; border:1px solid #f0d8bb; }
   .flow { font-size:13px; margin:5px 0; }
   .arrow { color:var(--accent); font-weight:700; }
   .summary { white-space:pre-wrap; font-size:14px; }
@@ -130,10 +134,39 @@ function render(d) {
       <span class="ptitle">${esc(p.title)}</span>
       <span class="${decClass(p.decision)}">${esc(p.decision)}</span></div>
       <div class="meta">${esc(p.venue)}${pct}`;
+    // 점수는 반드시 venue 기준선과 함께 — 척도가 venue마다 달라 원점수만으론 못 읽는다
+    if (p.avg_rating != null) {
+      const rel = p.rating_vs_venue != null
+        ? ` (venue 평균 ${p.rating_vs_venue>=0?'+':''}${p.rating_vs_venue.toFixed(1)})` : '';
+      h += ` · <b>${p.avg_rating.toFixed(1)}점</b>${rel} · 리뷰 ${p.rating_count}건`;
+      if (p.rating_spread != null && p.rating_spread >= 4)
+        h += ` <span class="split" title="리뷰어 점수가 ${p.rating_spread}점 차로 갈렸습니다">의견 갈림</span>`;
+    }
     for (const t of (p.tags||[])) h += `<span class="tag">${esc(t.kind)}: ${esc(t.reason)}</span>`;
     h += `</div></div>`;
   }
   h += `</div>`;
+
+  // 리뷰 점수 맥락 — "몇 점을 받아야 붙는가"
+  const rc = d.rating_context || {};
+  if (rc.rated_papers) {
+    h += `<div class="card"><div class="sec-title">📊 리뷰 점수</div>`;
+    h += `<div>유사 논문 ${rc.rated_papers}편의 평균 <b>${rc.neighbor_mean}점</b>`;
+    if (rc.accepted_mean != null && rc.rejected_mean != null)
+      h += ` — 통과한 논문 ${rc.accepted_mean}점 vs 탈락한 논문 ${rc.rejected_mean}점`;
+    h += `</div>`;
+    if (rc.threshold != null)
+      h += `<div style="margin-top:6px">당락 경계: <b>${esc(rc.threshold_venue)}</b> 기준 평균 <b>${rc.threshold}점</b> 이상이면 통과율 50%를 넘습니다.</div>`;
+    if ((rc.split_papers||[]).length) {
+      h += `<div class="ex" style="margin-left:0;margin-top:8px">리뷰어 의견이 크게 갈린 논문: `;
+      h += rc.split_papers.map(t=>esc(t)).join(' · ');
+      h += `</div>`;
+    }
+    // 표본 편향은 반드시 알린다 — 안 알리면 "NeurIPS가 붙기 쉽다"로 오독된다
+    if ((rc.biased_venues||[]).length)
+      h += `<div class="warn">⚠️ ${rc.biased_venues.map(esc).join(', ')}는 OpenReview에 <b>채택된 논문 위주로만</b> 공개됩니다. 이 학회의 accept율을 실제 채택률로 해석하지 마세요.</div>`;
+    h += `</div>`;
+  }
 
   // 리뷰 지적 패턴 — 빈도가 아니라 '코퍼스 평균 대비 얼마나 두드러지는가'를 보여준다.
   // 그냥 빈도로 줄세우면 baselines(코퍼스 78.8%)가 항상 1등이라 정보가 없다.
@@ -165,9 +198,12 @@ function render(d) {
   for (const t of d.venue_trends) {
     const w = (100*t.accept_rate).toFixed(0);
     h += `<div class="bar-row">
-      <span class="bar-label">${esc(t.venue)}</span>
+      <span class="bar-label">${esc(t.venue)}${t.is_coverage_biased?' <span class="split">표본편향</span>':''}</span>
       <span class="bar-track"><span class="bar-fill" style="width:${w}%;background:var(--accept)"></span></span>
       <span class="bar-count">${t.accept_count}/${t.paper_count} (${w}%)</span></div>`;
+    // 절대 accept율은 코퍼스 기준선 없이는 의미가 없다 (특히 편향 venue)
+    if (t.accept_lift != null)
+      h += `<div class="ex">이 학회 코퍼스 평균 ${(100*t.corpus_accept_rate).toFixed(0)}% 대비 <b>${t.accept_lift.toFixed(2)}배</b>${t.is_coverage_biased?' — 절대 채택률로 읽지 말 것':''}</div>`;
   }
   // 재투고 흐름
   if (d.resubmission_flows && d.resubmission_flows.length) {

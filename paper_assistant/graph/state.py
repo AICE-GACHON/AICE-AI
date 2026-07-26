@@ -25,6 +25,7 @@ class PipelineState(TypedDict, total=False):
     review_patterns: list[ReviewPattern]
     venue_trends: list[VenueTrend]
     resubmission_flows: list[ResubmissionFlow]
+    paper_ratings: dict[int, dict]   # paper_id -> {"avg", "count", "spread"}
 
     # --- 종합 (synthesis_node) ---
     report: Report

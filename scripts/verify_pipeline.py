@@ -25,10 +25,29 @@ print(f"{'='*70}")
 
 print(f"\n[유사 논문 {len(report.similar_papers)}편]")
 for p in report.similar_papers[:8]:
-    pct = f"{p.similarity_percentile:.0f}%ile" if p.similarity_percentile else "-"
-    print(f"  {p.rank:2}. [{pct:>7}] {p.decision:14} {p.title[:48]}")
+    if p.avg_rating is not None:
+        vs = f"{p.rating_vs_venue:+.1f}" if p.rating_vs_venue is not None else "  ? "
+        score = f"{p.avg_rating:4.1f}({vs}) x{p.rating_count}"
+    else:
+        score = "점수없음"
+    print(f"  {p.rank:2}. {score:>18}  {p.decision:14} {p.title[:44]}")
     for t in p.tags:
         print(f"        · {t.kind}: {t.reason}")
+
+rc = report.rating_context
+print(f"\n[리뷰 점수 맥락]  ※ 점수 옆 괄호는 같은 venue 평균 대비")
+if rc.rated_papers:
+    print(f"  이웃 평균 {rc.neighbor_mean} ({rc.rated_papers}편) — "
+          f"통과 {rc.accepted_mean} vs 탈락 {rc.rejected_mean}")
+    if rc.threshold is not None:
+        print(f"  당락 경계: {rc.threshold_venue} 기준 평균 {rc.threshold} 이상 "
+              f"→ 통과율 50% 초과")
+    for t in rc.split_papers:
+        print(f"  리뷰어 의견 갈림: {t[:56]}")
+    for v in rc.biased_venues:
+        print(f"  ⚠️ {v}: 채택 논문 위주 공개 — accept율을 실제 채택률로 읽지 말 것")
+else:
+    print("  점수 데이터 없음")
 
 print(f"\n[리뷰 지적 패턴 {len(report.review_patterns)}개]  "
       f"★=이 주제 특유 (lift≥1.25, p≤0.05)")
@@ -51,8 +70,11 @@ for pat in report.review_patterns:
 
 print(f"\n[게재 경향 {len(report.venue_trends)}개]")
 for t in report.venue_trends:
+    base = (f" · 코퍼스 {t.corpus_accept_rate*100:.0f}% 대비 {t.accept_lift:.2f}배"
+            if t.accept_lift else "")
+    warn = "  ⚠️표본편향" if t.is_coverage_biased else ""
     print(f"  {t.venue}: {t.accept_count}/{t.paper_count} accept "
-          f"({t.accept_rate*100:.0f}%)")
+          f"({t.accept_rate*100:.0f}%){base}{warn}")
 
 print(f"\n[종합 요약]\n{report.summary_markdown}")
 
