@@ -9,6 +9,8 @@ import json
 import logging
 
 from paper_assistant.db.connection import cursor
+from paper_assistant.embedding.specter2 import (
+    CONFIDENCE_MESSAGES, retrieval_confidence)
 from paper_assistant.graph.base_rates import load_base_rates
 from paper_assistant.graph.clustering import aggregate_by_aspect
 from paper_assistant.graph.llm import HAIKU, SONNET
@@ -17,8 +19,8 @@ from paper_assistant.graph.state import PipelineState
 from paper_assistant.graph.venue_stats import conference_of, load_venue_stats
 from paper_assistant.retrieval.hybrid_search import hybrid_search
 from paper_assistant.schemas import (
-    Report, ResubmissionFlow, ReviewPattern, SimilarityTag, SimilarPaper,
-    VenueTrend)
+    Report, ResubmissionFlow, RetrievalConfidence, ReviewPattern, SimilarityTag,
+    SimilarPaper, VenueTrend)
 
 log = logging.getLogger(__name__)
 
@@ -203,23 +205,34 @@ def synthesis_node(state: PipelineState, embedder, llm) -> dict:
         sp = SimilarPaper(
             paper_id=p.paper_id, openreview_id=p.openreview_id, title=p.title,
             venue=p.venue, year=p.year, decision=p.decision,
-            similarity_percentile=round(p.similarity_percentile or 0.0, 1),
-            rank=i + 1, tags=tags.get(p.paper_id, []))
+            rank=i + 1, match_type=p.match_type, tags=tags.get(p.paper_id, []))
         attach_paper_ratings(sp, venue_stats.get(p.venue), ratings.get(p.paper_id))
         similar.append(sp)
 
     rating_context = build_rating_context(papers, ratings, venue_stats)
 
+    # 코사인은 벡터 검색에 걸린 논문만 가진다 (FTS-only는 None).
+    # 순위 오름차순으로 정렬해야 상위 k개를 제대로 고른다.
+    ranked_cos = [p.cosine for p in sorted(
+        (p for p in papers if p.cosine is not None and p.vector_rank is not None),
+        key=lambda p: p.vector_rank)]
+    level, evidence = retrieval_confidence(ranked_cos)
+    confidence = RetrievalConfidence(
+        level=level, evidence=round(evidence, 4),
+        is_reliable=level != "weak",
+        message=CONFIDENCE_MESSAGES[level])
+
     report = Report(
         query_title=state["query_title"],
         query_abstract=state.get("query_abstract", ""),
+        confidence=confidence,
         similar_papers=similar,
         review_patterns=patterns,
         venue_trends=trends,
         rating_context=rating_context,
         resubmission_flows=state.get("resubmission_flows", []),
         summary_markdown=_summary(state, similar, patterns, trends,
-                                  rating_context, llm),
+                                  rating_context, confidence, llm),
     )
     return {"report": report}
 
@@ -256,7 +269,8 @@ def _rating_lines(rc) -> list[str]:
     return lines
 
 
-def _summary(state, similar, patterns, trends, rating_context, llm) -> str:
+def _summary(state, similar, patterns, trends, rating_context, confidence,
+             llm) -> str:
     distinctive = [p for p in patterns if p.is_distinctive]
     risky = _risky_first(patterns)
     rc = rating_context
@@ -264,6 +278,9 @@ def _summary(state, similar, patterns, trends, rating_context, llm) -> str:
     if llm is None:
         # 스텁: 구조화 데이터로 결정론적 요약
         lines = [f"## 유사 논문 {len(similar)}편"]
+        # 신뢰할 수 없는 결과면 맨 앞에서 알린다 — 뒤에 묻으면 아무도 안 읽는다
+        if not confidence.is_reliable:
+            lines.insert(0, f"> ⚠️ **{confidence.message}**\n")
         if distinctive:
             lines.append("- 이 주제 특유의 지적: " + ", ".join(
                 f"{p.label}({p.paper_count}/{p.total_papers}, lift {p.lift})"
@@ -289,8 +306,10 @@ def _summary(state, similar, patterns, trends, rating_context, llm) -> str:
 
     facts = {
         "query": state["query_title"],
+        "retrieval_confidence": confidence.level,
         "similar_papers": [{"title": s.title, "venue": s.venue,
-                            "decision": s.decision} for s in similar[:10]],
+                            "decision": s.decision, "match_type": s.match_type}
+                           for s in similar[:10]],
         # lift와 당락 대조를 같이 넘긴다. 빈도만 주면 모델이 "베이스라인 비교를
         # 강화하세요" 같은 코퍼스 상수를 결론처럼 써버린다 (§18).
         "review_patterns": [{
@@ -324,7 +343,13 @@ def _summary(state, similar, patterns, trends, rating_context, llm) -> str:
     }
     system = (
         "You are a research assistant. Given structured findings about papers similar "
-        "to a query, write a concise Korean markdown briefing (under 250 words) covering: "
+        "to a query, write a concise Korean markdown briefing (under 250 words).\n"
+        "FIRST, check retrieval_confidence. If it is 'weak', the corpus has no papers "
+        "on this topic and every finding below is noise — say so in the first line and "
+        "keep the rest to two sentences. If 'moderate', note that matches are from "
+        "adjacent fields before continuing. Never present weak-confidence results as "
+        "real findings.\n"
+        "Otherwise cover: "
         "what similar work exists, which review criticisms are DISTINCTIVE to this topic, "
         "and where such papers get published. Be concrete; cite the counts.\n"
         "Critical: a criticism with lift near 1.0 is the corpus-wide norm for ML papers "

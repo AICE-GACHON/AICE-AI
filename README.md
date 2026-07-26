@@ -46,6 +46,7 @@ python scripts/verify_embedding.py              # SPECTER2 차원·품질·속�
 python scripts/load_pilot.py 200                # 수집→임베딩→적재→검색 end-to-end
 python scripts/build_base_rates.py              # 코퍼스 aspect base rate 계산 (수집 후 1회)
 python scripts/build_venue_stats.py             # venue별 rating 기준선·당락 경계 (수집 후 1회)
+python scripts/verify_confidence.py             # 도메인 안/밖 쿼리로 검색 신뢰도 검증
 pytest tests/                                   # 회귀 테스트 (DB 없으면 통합 테스트만 skip)
 ```
 
@@ -57,20 +58,43 @@ SPECTER2(`allenai/specter2_base` + proximity adapter), **768차원**, 논문 1�
 **CPU로 충분하다** — 전체 43,515편이 약 0.8시간, GPU 불필요.
 
 ```python
-from paper_assistant.embedding.specter2 import Specter2Embedder, similarity_percentile
+from paper_assistant.embedding.specter2 import Specter2Embedder
 
 embedder = Specter2Embedder()
 vecs = embedder.encode([(title, abstract), ...])   # L2 정규화된 (N, 768)
 ```
 
-⚠️ **원시 코사인 값을 사용자에게 노출하지 말 것.** SPECTER2는 유사도가 0.72~0.98에
-압축되어 있어 **무관한 논문쌍도 0.845가 나온다**. `similarity_percentile()`로 백분위로
-변환해서 전달한다. 자세한 측정치는 [AI_파트_설계서.md](AI_파트_설계서.md) §11.2 참고.
+⚠️ **논문별 유사도 점수는 만들지 말 것** — 원시 코사인도, 백분위 변환도 안 된다.
+SPECTER2는 유사도가 0.72~0.98에 압축되어 무관한 논문쌍도 0.845가 나오고
+([§11.2](AI_파트_설계서.md)), 더 결정적으로 **검색 top-20의 코사인 폭이 0.013**이라
+1위와 20위를 어떤 변환으로도 못 가른다 ([§20](AI_파트_설계서.md)).
+`Report`는 점수 대신 `rank`와 `match_type`(왜 걸렸는지)을 준다.
+
+## 검색 신뢰도
+
+논문 사이는 못 갈라도 **쿼리 사이는 잘 갈린다**. top-5 평균 코사인이
+도메인 안은 0.946~0.966, 도메인 밖은 0.852~0.867로 **겹치지 않는다**.
+
+```python
+report.confidence.level        # strong | moderate | weak
+report.confidence.is_reliable  # False면 결과를 경고와 함께 표시할 것
+```
+
+이 판정이 없으면 "한자동맹 무역로"를 넣어도 ML 논문 20편에 리뷰 패턴·당락 분석까지
+멀쩡한 형식으로 붙여서 내놓는다 — 전부 노이즈인데 형식이 완벽해서 더 위험하다.
+`weak`면 요약 첫 줄에 경고가 붙는다.
+
+```bash
+python scripts/verify_confidence.py    # 도메인 안/밖 4개 쿼리로 판정 검증
+```
 
 ## 검색
 
 SPECTER2 벡터 + Postgres full-text를 **RRF**(순위 기반)로 결합한다.
 유사도 절대값이 못 쓸 물건이라(§11.2) 순위 기반 결합이 필수다.
+
+⚠️ pgvector의 기본 `hnsw.ef_search`는 **40**이라 `CANDIDATE_POOL`(50)보다 작으면
+벡터 후보가 조용히 잘린다. `hybrid_search`가 트랜잭션 로컬로 올려 쓴다 ([§20](AI_파트_설계서.md)).
 
 ```python
 from paper_assistant.retrieval.hybrid_search import hybrid_search
@@ -175,7 +199,7 @@ paper_assistant/
 scripts/                       # 조사·검증용 + init_db.sql / build_indexes.sql
                                #   + build_base_rates.py / build_venue_stats.py
                                #     (lift 분모·rating 기준선 사전 계산)
-tests/                         # 회귀 테스트 84건
+tests/                         # 회귀 테스트 99건
 ```
 
 **전체 적재를 마친 뒤** 벡터 인덱스를 생성할 것 (빈 테이블에 미리 만들면 적재가 느려진다):

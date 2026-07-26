@@ -1,5 +1,26 @@
 """RRF 결합 로직 테스트 (DB 불필요)."""
-from paper_assistant.retrieval.hybrid_search import rrf_fuse
+from paper_assistant.retrieval.hybrid_search import (
+    CANDIDATE_POOL, HNSW_EF_SEARCH, match_type, rrf_fuse)
+
+
+def test_match_type_reflects_which_retrievers_hit():
+    assert match_type(1, 1) == "both"        # 의미+용어
+    assert match_type(3, None) == "semantic"  # 임베딩만
+    assert match_type(None, 3) == "lexical"   # 용어만
+
+
+def test_match_type_treats_rank_zero_as_a_hit():
+    """순위는 1부터 매기지만, 0이 들어와도 '못 찾음'으로 오해하면 안 된다."""
+    assert match_type(0, None) == "semantic"
+    assert match_type(None, 0) == "lexical"
+
+
+def test_ef_search_covers_candidate_pool():
+    """HNSW는 ef_search보다 많은 행을 못 준다 — pool보다 반드시 커야 한다.
+
+    기본값 40 < CANDIDATE_POOL 50이라 벡터 후보가 잘리던 버그가 있었다 (§20).
+    """
+    assert HNSW_EF_SEARCH >= CANDIDATE_POOL
 
 
 def test_both_retrievers_agreeing_beats_either_alone():

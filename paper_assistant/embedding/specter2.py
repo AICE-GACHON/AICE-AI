@@ -89,7 +89,12 @@ _REF_PERCENTILES = [p for _, p in _REFERENCE_QUANTILES]
 
 
 def similarity_percentile(cosine: float) -> float:
-    """코사인 유사도 → 백분위(0~100). 클수록 무작위 쌍 대비 유사하다는 뜻.
+    """코사인 유사도 → 무작위 논문쌍 대비 백분위(0~100).
+
+    ⚠️ **논문별 유사도 표시에는 쓰지 말 것** (설계서 §20 실측).
+    검색 top-20의 코사인 폭이 0.013밖에 안 되어 이 함수를 통과시키면 전부 100이
+    된다 — 1위와 20위가 같은 값이 나오므로 사용자에게 보여줄 정보가 없다.
+    남겨둔 이유는 `retrieval_confidence()`가 **쿼리 단위** 판정에 쓰기 때문이다.
 
     예: 0.92 → 약 99.0 (무작위 쌍의 99%보다 유사 = 상위 1%)
     선형 보간이며, 참조 구간을 벗어나면 0/100에 수렴한다.
@@ -103,3 +108,44 @@ def similarity_percentile(cosine: float) -> float:
     s0, s1 = _REF_SCORES[i - 1], _REF_SCORES[i]
     p0, p1 = _REF_PERCENTILES[i - 1], _REF_PERCENTILES[i]
     return p0 + (p1 - p0) * (cosine - s0) / (s1 - s0)
+
+
+# --- 검색 결과 신뢰도 (쿼리 단위) -------------------------------------------
+#
+# 논문 사이는 못 가르지만 **쿼리 사이는 아주 잘 갈린다** (설계서 §20 실측).
+# top-5 평균 코사인:
+#   도메인 안(GNN·LSTM·Transformer·LoRA·diffusion·FL)  0.9457 ~ 0.9664
+#   도메인 밖(치즈미생물학·바흐·안데스지질·무릎수술·한자동맹) 0.8522 ~ 0.8668
+# 겹치는 구간이 전혀 없다. 경계는 무작위쌍 분포의 분위수에 맞춰 잡는다
+# (0.8998 = 95분위, 0.9231 = 99분위).
+#
+# 이 판정이 없으면 "치즈 숙성 미생물학"을 넣어도 ML 논문 20편을 자신있게
+# 보여주는 게 현재의 최악 실패 모드다.
+
+STRONG_THRESHOLD = 0.93     # 무작위쌍 99분위 초과
+MODERATE_THRESHOLD = 0.90   # 무작위쌍 95분위
+
+CONFIDENCE_MESSAGES = {
+    "strong": "이 주제의 논문이 코퍼스에 충분히 있습니다.",
+    "moderate": "직접 대응하는 논문은 적고, 인접 분야 위주로 매칭됐습니다. "
+                "결과를 참고 수준으로 보세요.",
+    "weak": "코퍼스(ICLR·NeurIPS)에 이 주제의 논문이 사실상 없습니다. "
+            "아래 결과는 무작위 논문과 다를 바 없으니 신뢰하지 마세요.",
+}
+
+
+def retrieval_confidence(cosines: list[float], k: int = 5) -> tuple[str, float]:
+    """상위 코사인들로 (신뢰도 등급, 근거값) 판정.
+
+    cosines: 벡터 검색 상위 코사인 (내림차순). 비어 있으면 ('weak', 0.0).
+    반환값의 근거값은 top-k 평균 코사인 — 진단용이며 사용자에게 노출하지 않는다.
+    """
+    usable = [c for c in cosines if c is not None][:k]
+    if not usable:
+        return "weak", 0.0
+    score = sum(usable) / len(usable)
+    if score >= STRONG_THRESHOLD:
+        return "strong", score
+    if score >= MODERATE_THRESHOLD:
+        return "moderate", score
+    return "weak", score

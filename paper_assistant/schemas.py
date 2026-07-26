@@ -1,7 +1,11 @@
 """공개 API 스키마 (백엔드 통합 계약).
 
 백엔드 팀은 `analyze(...) -> Report` 하나와 이 Pydantic 모델들만 알면 된다.
-원시 코사인 값은 절대 노출하지 않는다 — similarity_percentile만 담는다 (설계서 §11.2).
+
+논문별 유사도 **점수는 담지 않는다** (설계서 §20). 원시 코사인은 물론이고
+백분위 변환도 못 쓴다 — 검색 top-20의 코사인 폭이 0.013이라 1위와 20위가 같은
+값이 되기 때문이다. 대신 `rank`(순위), `match_type`(왜 걸렸는지),
+그리고 쿼리 단위 `RetrievalConfidence`(결과를 믿어도 되는지)를 준다.
 """
 from pydantic import BaseModel, Field
 
@@ -19,9 +23,11 @@ class SimilarPaper(BaseModel):
     venue: str
     year: int
     decision: str
-    similarity_percentile: float = Field(
-        description="무작위 논문쌍 대비 백분위(0~100). 원시 코사인 아님.")
     rank: int
+    match_type: str = Field(
+        default="both",
+        description="both(의미+용어 모두) | semantic(의미만) | lexical(용어만). "
+                    "왜 이 논문이 걸렸는지의 근거.")
     tags: list[SimilarityTag] = Field(default_factory=list)
 
     # --- 리뷰 점수 (§19). 원점수는 venue별 척도가 달라 단독 해석 금지 ---
@@ -123,10 +129,28 @@ class ResubmissionFlow(BaseModel):
     count: int
 
 
+class RetrievalConfidence(BaseModel):
+    """검색 결과 전체를 믿어도 되는지 (설계서 §20).
+
+    논문 사이는 못 가르지만 쿼리 사이는 잘 갈린다 — 도메인 안 쿼리의 top-5 평균
+    코사인은 0.946~0.966, 도메인 밖은 0.852~0.867로 겹치지 않는다.
+    이 판정이 없으면 "치즈 숙성 미생물학"에도 ML 논문 20편을 자신있게 내놓는다.
+    """
+    level: str = Field(default="strong", description="strong | moderate | weak")
+    message: str = Field(default="", description="사용자에게 보여줄 설명")
+    is_reliable: bool = Field(
+        default=True, description="False면 프론트는 결과를 경고와 함께 표시할 것")
+    evidence: float = Field(
+        default=0.0,
+        description="top-5 평균 코사인. **진단용 — 사용자에게 노출 금지**")
+
+
 class Report(BaseModel):
     """analyze()의 최종 반환. 프론트가 섹션별로 렌더링할 수 있도록 구조화."""
     query_title: str
     query_abstract: str
+    confidence: RetrievalConfidence = Field(
+        default_factory=lambda: RetrievalConfidence())
     similar_papers: list[SimilarPaper] = Field(default_factory=list)
     review_patterns: list[ReviewPattern] = Field(default_factory=list)
     venue_trends: list[VenueTrend] = Field(default_factory=list)

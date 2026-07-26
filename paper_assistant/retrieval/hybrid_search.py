@@ -12,12 +12,15 @@ import logging
 from dataclasses import dataclass
 
 from paper_assistant.db.connection import cursor
-from paper_assistant.embedding.specter2 import similarity_percentile
 
 log = logging.getLogger(__name__)
 
 RRF_K = 60
 CANDIDATE_POOL = 50   # 각 검색기에서 가져올 후보 수
+
+# HNSW는 ef_search(기본 40)보다 많은 행을 반환하지 못한다. CANDIDATE_POOL이 50이라
+# 기본값 그대로면 벡터 후보가 40개로 잘려 RRF 결합이 한쪽만 얕아진다 (§20 실측).
+HNSW_EF_SEARCH = max(CANDIDATE_POOL * 4, 100)
 
 
 @dataclass
@@ -32,12 +35,19 @@ class SearchResult:
     rrf_score: float
     vector_rank: int | None
     fts_rank: int | None
-    similarity_percentile: float | None
-    """무작위 논문쌍 대비 백분위. 원시 코사인은 노출하지 않는다 (§11.2)."""
+    cosine: float | None
+    """원시 코사인. **사용자에게 절대 노출 금지** — 쿼리 단위 신뢰도 판정에만 쓴다."""
+    match_type: str
+    """both(의미+용어) / semantic(의미만) / lexical(용어만). 왜 걸렸는지의 $0 근거."""
 
 
 def _vector_search(cur, embedding, limit: int) -> list[tuple[int, float]]:
     """(paper_id, 코사인 유사도) 순위순. 벡터는 L2 정규화 상태로 저장돼 있다."""
+    # ef_search < limit이면 요청한 개수를 못 채운다 (기본 40 < pool 50).
+    # SET은 바인드 파라미터를 못 받으므로 set_config를 쓴다. 세 번째 인자 true =
+    # 트랜잭션 로컬이라 풀에 반납된 커넥션에 설정이 남지 않는다.
+    cur.execute("SELECT set_config('hnsw.ef_search', %s, true)",
+                (str(HNSW_EF_SEARCH),))
     cur.execute(
         """
         SELECT id, 1 - (embedding <=> %s) AS cosine
@@ -126,7 +136,6 @@ def hybrid_search(embedding, query_text: str, top_k: int = 20,
         if pid not in meta:
             continue
         openreview_id, title, abstract, venue, year, decision = meta[pid]
-        cos = cosines.get(pid)
         results.append(SearchResult(
             paper_id=pid,
             openreview_id=openreview_id,
@@ -138,6 +147,19 @@ def hybrid_search(embedding, query_text: str, top_k: int = 20,
             rrf_score=score,
             vector_rank=vector_ranks.get(pid),
             fts_rank=fts_ranks.get(pid),
-            similarity_percentile=similarity_percentile(cos) if cos is not None else None,
+            cosine=cosines.get(pid),
+            match_type=match_type(vector_ranks.get(pid), fts_ranks.get(pid)),
         ))
     return results
+
+
+def match_type(vector_rank: int | None, fts_rank: int | None) -> str:
+    """왜 이 논문이 걸렸는지. 검색기 두 개의 히트 여부만 보면 된다 — 비용 $0.
+
+    both     : 임베딩과 용어 양쪽 모두 → 가장 믿을 만한 매칭
+    semantic : 임베딩만 → 접근은 비슷한데 쓰는 용어가 다르다
+    lexical  : 용어만 → 같은 단어를 쓰지만 접근은 다를 수 있다
+    """
+    if vector_rank is not None and fts_rank is not None:
+        return "both"
+    return "semantic" if vector_rank is not None else "lexical"

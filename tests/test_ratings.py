@@ -30,8 +30,7 @@ STATS = {"ICLR 2025": ICLR, "NeurIPS 2024": NEURIPS}
 
 def _paper(pid=1, venue="ICLR 2025", decision="reject"):
     return SimilarPaper(paper_id=pid, openreview_id="x", title="T", venue=venue,
-                        year=2025, decision=decision, similarity_percentile=99.0,
-                        rank=1)
+                        year=2025, decision=decision, rank=1)
 
 
 # ------------------------------------------------- 논문별 rating 부착

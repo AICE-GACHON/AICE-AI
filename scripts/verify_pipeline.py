@@ -23,6 +23,12 @@ print(f"\n{'='*70}")
 print(f"쿼리: {report.query_title}")
 print(f"{'='*70}")
 
+c = report.confidence
+print(f"\n[검색 신뢰도] {c.level.upper()} — {c.message}")
+if not c.is_reliable:
+    print("  ※ 아래 결과는 신뢰할 수 없습니다.")
+
+MATCH_LABEL = {"both": "의미+용어", "semantic": "의미만", "lexical": "용어만"}
 print(f"\n[유사 논문 {len(report.similar_papers)}편]")
 for p in report.similar_papers[:8]:
     if p.avg_rating is not None:
@@ -30,7 +36,8 @@ for p in report.similar_papers[:8]:
         score = f"{p.avg_rating:4.1f}({vs}) x{p.rating_count}"
     else:
         score = "점수없음"
-    print(f"  {p.rank:2}. {score:>18}  {p.decision:14} {p.title[:44]}")
+    print(f"  {p.rank:2}. [{MATCH_LABEL[p.match_type]:>6}] {score:>18}  "
+          f"{p.decision:14} {p.title[:38]}")
     for t in p.tags:
         print(f"        · {t.kind}: {t.reason}")
 

@@ -75,13 +75,15 @@ def main(n_papers: int = 200, with_reviews: bool = False):
     results = hybrid_search(qvec, f"{query.title} {query.abstract}", top_k=5)
     elapsed = (time.perf_counter() - start) * 1000
 
-    print(f"{'순위':>3} {'RRF':>7} {'벡터':>5} {'FTS':>5} {'백분위':>7}  제목")
-    print("-" * 78)
+    # 코사인은 진단용으로만 찍는다 — 사용자 대상 출력에는 절대 넣지 않는다 (§20)
+    print(f"{'순위':>3} {'RRF':>7} {'벡터':>5} {'FTS':>5} {'매칭':>9} {'cos':>7}  제목")
+    print("-" * 84)
     for i, r in enumerate(results, 1):
-        pct = f"{r.similarity_percentile:.1f}" if r.similarity_percentile else "-"
         vr = r.vector_rank if r.vector_rank else "-"
         fr = r.fts_rank if r.fts_rank else "-"
-        print(f"{i:>3} {r.rrf_score:>7.4f} {vr:>5} {fr:>5} {pct:>7}  {r.title[:44]}")
+        cos = f"{r.cosine:.4f}" if r.cosine is not None else "-"
+        print(f"{i:>3} {r.rrf_score:>7.4f} {vr:>5} {fr:>5} {r.match_type:>9} "
+              f"{cos:>7}  {r.title[:40]}")
     print(f"\n검색 소요: {elapsed:.0f}ms")
 
     if results and results[0].openreview_id == query.openreview_id:

@@ -55,6 +55,10 @@
            background:#fdf0e3; color:#a35b12; margin-left:4px; }
   .warn { margin-top:10px; padding:9px 11px; border-radius:8px; font-size:13px;
           background:#fdf0e3; color:#8a4d10; border:1px solid #f0d8bb; }
+  .warn.danger { background:#fdeceb; color:#8f2f28; border-color:#f2c9c5;
+                 font-size:14px; font-weight:500; }
+  .match { display:inline-block; font-size:11px; padding:1px 6px; border-radius:9px;
+           background:#eef2fb; color:#3b5ba5; margin-left:6px; cursor:help; }
   .flow { font-size:13px; margin:5px 0; }
   .arrow { color:var(--accent); font-weight:700; }
   .summary { white-space:pre-wrap; font-size:14px; }
@@ -123,17 +127,30 @@ function render(d) {
     <div><b>${esc(d.query_title)||"<span class='muted'>제목 없음</span>"}</b></div>
     <div class="muted" style="margin-top:6px">${esc((d.query_abstract||"").slice(0,300))}${(d.query_abstract||"").length>300?"…":""}</div></div>`;
 
+  // 검색 신뢰도 — 결과를 믿어도 되는지. 신뢰 불가면 목록보다 먼저, 크게 알린다.
+  const conf = d.confidence || {};
+  if (conf.level && conf.level !== "strong") {
+    const cls = conf.is_reliable ? "warn" : "warn danger";
+    h += `<div class="card"><div class="${cls}" style="margin-top:0">
+      ${conf.is_reliable ? "ℹ️" : "⚠️"} ${esc(conf.message)}</div></div>`;
+  }
+
   // 유사 논문
+  // 논문별 유사도 점수는 표시하지 않는다 — top-20 코사인 폭이 0.013이라
+  // 어떤 변환을 써도 1위와 20위가 같은 값이 된다 (§20). 순위 + 매칭 근거로 대체.
+  const MATCH = {both:["의미+용어","임베딩과 용어 양쪽에서 걸림 — 가장 믿을 만한 매칭"],
+                 semantic:["의미","접근은 비슷하지만 쓰는 용어가 다름"],
+                 lexical:["용어","같은 용어를 쓰지만 접근은 다를 수 있음"]};
   h += `<div class="card"><div class="sec-title">📄 유사 논문 <span class="pill">${d.similar_papers.length}편</span></div>`;
   if (!d.similar_papers.length) h += `<div class="muted">결과 없음.</div>`;
   for (const p of d.similar_papers) {
-    const pct = p.similarity_percentile
-      ? ` · 유사도 상위 ${Math.max(1, Math.round(100-p.similarity_percentile))}%` : "";
+    const m = MATCH[p.match_type];
+    const badge = m ? ` <span class="match" title="${esc(m[1])}">${m[0]}</span>` : "";
     h += `<div class="paper"><div class="paper-top">
       <span class="rank">${p.rank}.</span>
       <span class="ptitle">${esc(p.title)}</span>
       <span class="${decClass(p.decision)}">${esc(p.decision)}</span></div>
-      <div class="meta">${esc(p.venue)}${pct}`;
+      <div class="meta">${esc(p.venue)}${badge}`;
     // 점수는 반드시 venue 기준선과 함께 — 척도가 venue마다 달라 원점수만으론 못 읽는다
     if (p.avg_rating != null) {
       const rel = p.rating_vs_venue != null
