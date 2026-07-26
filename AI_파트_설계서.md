@@ -71,7 +71,7 @@ Supervisor 패턴 대신 **고정 DAG**. 워크플로우가 매번 동일하므�
 | `retrieval_node` | 없음 | SPECTER2 임베딩 → pgvector 코사인 검색 + Postgres `tsvector` full-text 검색 → RRF(Reciprocal Rank Fusion) 결합 → 상위 K편 |
 | `similarity_tagging_node` | Haiku | 상위 10~20편 각각에 대해 "왜 유사한가" 태깅: `methodology` / `dataset` / `problem_setting` / `citation` + 한 줄 근거. 논문당 1콜, 병렬 호출 |
 | `review_analysis_node` | 없음 (임베딩만) | 유사 논문들의 **사전 추출된 지적 항목**을 DB에서 로드 → 임베딩 기반 클러스터링(HDBSCAN 또는 agglomerative) → "10편 중 6편이 실험 규모 지적" 형태로 집계 |
-| `venue_trend_node` | 없음 | SQL 집계: 유사 논문들의 최종 decision 분포, 학회별 accept 비율, 재투고 흐름(예: ICLR reject → NeurIPS accept N건) |
+| `venue_trend_node` | 없음 | SQL 집계: **학회 단위**(ICLR/NeurIPS) accept 비율 + 재투고 흐름. 연도별로 쪼개면 셀당 1~3편이라 표본이 무의미 → `split_part`로 연도 떼고 학회로 합침 (§14.6). 재투고 흐름은 연도까지 유지 |
 | `synthesis_node` | Sonnet | 세 분석 결과를 받아 사람이 읽는 종합 리포트 생성. 구조화 JSON도 함께 반환 (프론트가 컴포넌트별 렌더링 가능하도록) |
 
 ### 2.3 수집/인덱싱 파이프라인 (배치)
@@ -588,7 +588,15 @@ similarity_percentile만** 담는다 (§11.2). JSON 직렬화 왕복 테스트 �
 
 - ~~**재투고 흐름**~~ **✅ 완료** (§15)
 - ~~**PDF 입력**~~ **✅ 완료** (§16) — pypdf 휴리스틱, llm 있으면 Haiku 정제
-- **similarity_tagging 실측**: 크레딧으로 Haiku 태깅 품질 확인 (아직 스텁만 검증)
+- ~~**similarity_tagging 실측**~~ **✅ 완료** (§17) — LSTM 쿼리로 실제 Haiku+Sonnet 검증
+
+### 14.6 게재 경향은 학회 단위 집계 (LLM 실측 후 수정)
+
+초기엔 venue(ICLR 2024)별로 집계했으나, 유사 논문 20편을 venue×연도로 나누면
+셀당 1~3편이라 accept율이 통계적으로 무의미했다(LSTM 쿼리 실측: "NeurIPS 2023 3/3"
+같은 표본). `split_part(venue,' ',1)`로 학회 단위(ICLR/NeurIPS)로 합쳐 표본을 키움
+→ "ICLR 4/15(27%) vs NeurIPS 4/5(80%)"처럼 의미 있는 비율. 연도 정보는
+재투고 흐름(resubmission_flows)에서 유지된다.
 
 ---
 
@@ -646,3 +654,20 @@ NeurIPS venue 적재 후 ICLR↔NeurIPS 흐름이 다수 잡힐 것으로 예상
 
 **브라우저 end-to-end 검증 완료**: "분자 특성 예측 GNN" 쿼리 → 유사 GNN 논문 20편,
 리뷰 패턴(baselines 19/20 등), 게재 경향 정상 렌더. 백엔드 계약이 실제로 동작함을 확인.
+
+---
+
+## 17. LLM 경로(토글 ON) 실측 평가 (2026-07-26)
+
+LSTM 원논문 초록을 use_llm=True로 실행($0.05) — Haiku 태깅 + Sonnet 종합의 첫 실전.
+
+**태깅(Haiku) — 정확**: MC-LSTM("mass conservation으로 LSTM 확장"), xLSTM("원 LSTM
+계승"), S4(장기의존성은 같지만 LSTM 인용 아님 → citation 태그 제외)까지 미묘한 구분을
+정확히 함. **주의**: `citation` 태그는 실제 참고문헌이 아니라 주제 기반 추론이라
+단정은 근거가 약할 수 있음.
+
+**종합(Sonnet) — 사실 충실 + 인사이트**: "MC-LSTM·Boosted LSTM은 reject → 단순 구조
+변형만으론 통과 어렵다"는 데이터 근거 관찰 도출. 언급 논문·decision·수치가 전부 실제
+결과와 일치(환각 없음).
+
+이 평가에서 게재 경향 표본 문제를 발견 → §14.6으로 수정.

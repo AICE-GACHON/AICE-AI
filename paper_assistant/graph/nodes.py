@@ -103,13 +103,15 @@ def venue_trend_node(state: PipelineState, embedder, llm) -> dict:
         return {"venue_trends": []}
 
     with cursor() as cur:
+        # 학회 단위(ICLR/NeurIPS)로 집계 — 연도별로 쪼개면 셀당 표본이 1~3편이라
+        # accept율이 통계적으로 무의미해진다(§14 실측). split_part로 연도를 떼고 합침.
         cur.execute(
             """
-            SELECT venue,
+            SELECT split_part(venue, ' ', 1) AS conf,
                    count(*) AS n,
                    count(*) FILTER (WHERE decision LIKE 'accept%%') AS accepts
             FROM papers WHERE id = ANY(%s)
-            GROUP BY venue ORDER BY n DESC
+            GROUP BY split_part(venue, ' ', 1) ORDER BY n DESC
             """,
             (paper_ids,))
         trends = [VenueTrend(venue=r[0], paper_count=r[1], accept_count=r[2],
