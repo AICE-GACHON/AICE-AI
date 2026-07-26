@@ -108,6 +108,20 @@ CREATE TABLE review_points (
 CREATE INDEX review_points_paper  ON review_points (paper_id);
 CREATE INDEX review_points_aspect ON review_points (aspect, sentiment);
 
+-- ------------------------------------------------------ aspect_base_rates
+-- 코퍼스 전체에서 각 aspect가 지적되는 비율. 쿼리 시점 리뷰 패턴의 lift 분모다.
+-- 빈도만 세면 base rate가 높은 aspect(baselines 78.8%)가 항상 1등이 되어
+-- 정보량이 0이 된다 (설계서 §18). 수집 완료 후 scripts/build_base_rates.py로 채운다.
+CREATE TABLE aspect_base_rates (
+    aspect       TEXT NOT NULL,
+    sentiment    TEXT NOT NULL,      -- weakness / strength / question
+    paper_count  BIGINT NOT NULL,    -- 이 aspect를 지적받은 논문 수
+    total_papers BIGINT NOT NULL,    -- 해당 sentiment의 지적이 추출된 논문 총수
+    base_rate    REAL   NOT NULL,    -- paper_count / total_papers
+    computed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (aspect, sentiment)
+);
+
 -- ------------------------------------------------------------- citations
 -- 그래프 DB 대신 단순 엣지 테이블. 다중 홉 순회 기능이 없어 이것으로 충분하다.
 CREATE TABLE citations (

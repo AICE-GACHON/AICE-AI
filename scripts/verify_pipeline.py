@@ -30,9 +30,24 @@ for p in report.similar_papers[:8]:
     for t in p.tags:
         print(f"        · {t.kind}: {t.reason}")
 
-print(f"\n[리뷰 지적 패턴 {len(report.review_patterns)}개]")
-for pat in report.review_patterns[:5]:
-    print(f"  [{pat.aspect}] {pat.paper_count}/{pat.total_papers}편: {pat.label[:60]}")
+print(f"\n[리뷰 지적 패턴 {len(report.review_patterns)}개]  "
+      f"★=이 주제 특유 (lift≥1.25, p≤0.05)")
+print(f"  {'':2}{'지적':<16}{'관측':>8}{'코퍼스':>8}{'lift':>7}{'p':>8}   당락 대조")
+for pat in report.review_patterns:
+    mark = "★" if pat.is_distinctive else " "
+    base = f"{pat.base_rate*100:.0f}%" if pat.base_rate else "-"
+    lift = f"{pat.lift:.2f}" if pat.lift else "-"
+    pval = f"{pat.p_value:.3f}" if pat.p_value is not None else "-"
+    obs = f"{pat.paper_count}/{pat.total_papers}"
+    if pat.accept_rate_with is not None and pat.accept_rate_without is not None:
+        sig = "✔" if pat.is_contrast_significant else " "
+        contrast = (f"{sig} 지적받음 {pat.accept_with}/{pat.decided_with} "
+                    f"({pat.accept_rate_with*100:.0f}%) vs "
+                    f"미지적 {pat.accept_without}/{pat.decided_without} "
+                    f"({pat.accept_rate_without*100:.0f}%)  p={pat.contrast_p_value}")
+    else:
+        contrast = "-"
+    print(f"  {mark} {pat.label:<16}{obs:>8}{base:>8}{lift:>7}{pval:>8}   {contrast}")
 
 print(f"\n[게재 경향 {len(report.venue_trends)}개]")
 for t in report.venue_trends:

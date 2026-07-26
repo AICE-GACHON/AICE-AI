@@ -44,7 +44,8 @@ python scripts/count_all.py                     # venue별 논문 수 집계
 python scripts/verify_normalize.py              # 10개 venue 정규화 검증
 python scripts/verify_embedding.py              # SPECTER2 차원·품질·속도 검증
 python scripts/load_pilot.py 200                # 수집→임베딩→적재→검색 end-to-end
-pytest tests/                                   # 테스트 25건 (DB 없으면 통합 테스트만 skip)
+python scripts/build_base_rates.py              # 코퍼스 aspect base rate 계산 (수집 후 1회)
+pytest tests/                                   # 회귀 테스트 (DB 없으면 통합 테스트만 skip)
 ```
 
 `scripts/` 실행 시 `PYTHONPATH`에 저장소 루트가 필요하다 (Windows: `$env:PYTHONPATH="."`).
@@ -100,8 +101,24 @@ python scripts/verify_pipeline.py           # $0, 스텁
 PAPER_ASSISTANT_USE_LLM=1 python ...        # Haiku 태깅 + Sonnet 종합
 ```
 
-리뷰 패턴은 **키워드 aspect 집계**로 만든다("20편 중 12편 baselines 지적").
-SPECTER2가 짧은 리뷰 문장 클러스터링에 부적합해서다 — [설계서 §14](AI_파트_설계서.md) 참고.
+리뷰 패턴은 **키워드 aspect 집계**로 만든다. SPECTER2가 짧은 리뷰 문장 클러스터링에
+부적합해서다 — [설계서 §14](AI_파트_설계서.md) 참고.
+
+⚠️ **빈도로 줄세우지 말 것.** 코퍼스의 78.8%가 baselines 지적을 받으므로
+"20편 중 17편 baselines"는 정보량이 0이다. 두 가지를 함께 낸다 ([§18](AI_파트_설계서.md)):
+
+- **lift** = 관측률 ÷ 코퍼스 base rate, + 이항검정 p값 → `is_distinctive`
+- **당락 대조** = 이 지적을 받은 이웃 vs 아닌 이웃의 accept율, + Fisher 정확검정
+  → `is_contrast_significant`. **False면 표본 부족이므로 단정 금지** (n=4에서
+  "0% 통과"는 노이즈다).
+
+base rate는 사전 계산해 `aspect_base_rates`에 넣어둔다 — 수집 후 1회 실행:
+
+```bash
+python scripts/build_base_rates.py
+```
+
+이 테이블이 비어 있으면 lift 없이 예전처럼 빈도순으로 폴백한다(경고 로그).
 
 ## 구조
 
@@ -127,11 +144,13 @@ paper_assistant/
 └── graph/                     # LangGraph 파이프라인
     ├── state.py               # 공유 상태 (TypedDict)
     ├── llm.py                 # Claude 래퍼 (토글 가능)
-    ├── clustering.py          # aspect 집계 + 범용 클러스터 유틸
+    ├── base_rates.py          # 코퍼스 aspect base rate 조회 (lift 분모)
+    ├── clustering.py          # aspect 집계 + lift/Fisher 검정 + 범용 클러스터 유틸
     ├── nodes.py               # 6개 노드
     └── pipeline.py            # DAG 조립 + analyze()
 scripts/                       # 조사·검증용 + init_db.sql / build_indexes.sql
-tests/                         # 회귀 테스트 47건
+                               #   + build_base_rates.py (lift 분모 사전 계산)
+tests/                         # 회귀 테스트 72건
 ```
 
 **전체 적재를 마친 뒤** 벡터 인덱스를 생성할 것 (빈 테이블에 미리 만들면 적재가 느려진다):

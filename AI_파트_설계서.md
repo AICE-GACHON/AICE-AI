@@ -587,7 +587,7 @@ similarity_percentile만** 담는다 (§11.2). JSON 직렬화 왕복 테스트 �
 ### 14.5 남은 것
 
 - ~~**재투고 흐름**~~ **✅ 완료** (§15)
-- ~~**PDF 입력**~~ **✅ 완료** (§16) — pypdf 휴리스틱, llm 있으면 Haiku 정제
+- ~~**PDF 입력**~~ **✅ 완료** (§16) — PyMuPDF + 폰트 크기 기반 제목 추출(저자 배제)
 - ~~**similarity_tagging 실측**~~ **✅ 완료** (§17) — LSTM 쿼리로 실제 Haiku+Sonnet 검증
 
 ### 14.6 게재 경향은 학회 단위 집계 (LLM 실측 후 수정)
@@ -638,9 +638,30 @@ NeurIPS venue 적재 후 ICLR↔NeurIPS 흐름이 다수 잡힐 것으로 예상
 
 ### 16.1 PDF 입력 (`pdf/extract.py`) — 실제 기능
 
-`analyze(pdf_bytes=...)` 지원. pypdf로 첫 2페이지 텍스트를 뽑아 휴리스틱으로
-제목/초록 추출: 제목 = Abstract 이전 첫 의미줄, 초록 = "Abstract"~"Introduction" 사이.
-`llm`이 주어지면 Haiku로 정제(선택). `input_node`에 연결됨.
+`analyze(pdf_bytes=...)` 지원. PyMuPDF로 첫 2페이지를 읽고,
+**제목은 폰트 크기로, 초록은 텍스트 마커로** 뽑는다. `input_node`에 연결됨.
+
+**제목을 폰트 크기로 뽑는 이유 (실측)**: 텍스트 순서만 보면 제목 바로 뒤에 붙는
+저자 줄을 걸러낼 수 없다 — 실제로 "Agentic Business Process Management: A Research
+Manifesto **Diego Calvanese, Angelo Casciani, ...**"처럼 저자가 제목에 섞여 나왔다.
+논문 첫 페이지에서 제목은 항상 본문보다 큰 폰트다(실측: 제목 14.3~17.2pt vs 저자 10pt).
+최대 폰트 크기의 **75% 이상**인 span만 채택한다.
+
+- 임계값이 95%가 아니라 75%인 이유: **드롭캡 조판**(ICLR 스타일)은 첫 글자만
+  17.2pt이고 나머지는 13.8pt라, 좁게 잡으면 `"R N N R"`처럼 첫 글자만 남는다.
+- 드롭캡으로 분리된 `"R ECURRENT"`는 정규식(`[A-Z] [A-Z]{2,}`)으로 다시 붙인다.
+- arXiv 세로 헤더(20pt)가 제목보다 클 수 있어 `_HEADER_CRUFT`로 먼저 제외한다.
+
+검증(실제 PDF 3종): `Agentic Business Process Management: A Research Manifesto`,
+`ImageNet Classification with Deep Convolutional Neural Networks`,
+`RECURRENT NEURAL NETWORK REGULARIZATION` — 모두 저자 없이 정확히 추출.
+
+**한계 — 1990년대 TeX PDF는 지원하지 않음**: LSTM(1997) 같은 옛날 PDF는 글자가
+물리적으로 쪼개져 저장되고(`Ho`+`c`+`hreiter`), 합자가 표준 유니코드가 아닌 폰트
+내부 코드(`\x0e`=ffi, `\x0d`=fl)라 **어떤 추출기로도 복원이 어렵다**(pypdf·PyMuPDF
+모두 실패 확인). 실사용자는 최신 논문을 쓰므로 복원 로직을 넣지 않기로 결정.
+`_looks_garbled()`가 이를 감지해 경고 로그를 남기며, 이 경우 제목/초록 직접
+입력이 확실한 경로다.
 
 ### 16.2 데모 웹 서버 (`demo/`) — 독립·삭제 가능
 
@@ -671,3 +692,81 @@ LSTM 원논문 초록을 use_llm=True로 실행($0.05) — Haiku 태깅 + Sonnet
 결과와 일치(환각 없음).
 
 이 평가에서 게재 경향 표본 문제를 발견 → §14.6으로 수정.
+
+---
+
+## 18. 리뷰 패턴 재설계 — 빈도 → lift + 당락 대조 (2026-07-26)
+
+### 18.1 문제: 빈도 정렬은 코퍼스 상수를 1등으로 올린다
+
+`aggregate_by_aspect`가 `paper_count` 내림차순으로 정렬하니, base rate가 높은
+aspect가 쿼리와 무관하게 항상 상위를 차지했다. 실측 base rate(43,033편 기준):
+
+| aspect | 지적받은 논문 | base rate |
+|---|---|---|
+| baselines | 33,896 | **78.8%** |
+| clarity | 28,319 | 65.8% |
+| significance | 27,368 | 63.6% |
+| theoretical_soundness | 26,660 | 62.0% |
+| novelty | 17,824 | 41.4% |
+| related_work | 16,688 | 38.8% |
+| experimental_scale | 11,273 | 26.2% |
+| reproducibility | 9,691 | 22.5% |
+
+"분자 특성 예측 GNN" 쿼리의 이전 출력은 baselines 17/20 → clarity 13/20 →
+significance 13/20 순이었는데, lift로 환산하면 각각 **1.08 / 0.99 / 1.02**다.
+즉 상위 3개가 전부 "ML 논문이면 다 받는 지적"이었다. 사용자에게 정보량 0.
+
+### 18.2 해결 1 — lift + 이항검정
+
+`aspect_base_rates` 테이블(scripts/build_base_rates.py로 사전 계산)을 분모로 삼아
+`lift = 관측률 / base_rate`를 계산하고, 이웃 n=20에서의 우연을 걸러내기 위해
+이항검정 단측 p값을 함께 낸다. `is_distinctive = lift ≥ 1.25 and p ≤ 0.05`.
+
+정렬 키는 `(is_distinctive, lift, paper_count)`. base_rates가 없으면 lift가 전부
+None이 되어 자연히 기존 빈도순으로 폴백한다(DB 없는 테스트 경로).
+
+**중요한 부수효과**: 위 GNN 쿼리는 이제 "이 주제 특유의 지적 없음"을 반환한다.
+이게 정직한 답이다 — 억지 인사이트를 만들지 않는 것 자체가 품질이다.
+
+### 18.3 해결 2 — 당락 대조 (실질적으로 가장 유용한 정보)
+
+같은 이웃 안에서 **이 지적을 받은 논문 vs 받지 않은 논문의 accept율**을 비교한다.
+"이 지적은 받아도 붙는다 / 받으면 떨어진다"가 사용자가 실제로 쓰는 정보다.
+
+표본이 작아서(이웃 20편 중 4편이 지적받는 식) 검정이 필수다. 기대빈도 5 미만이라
+카이제곱을 못 쓰므로 **단측 Fisher 정확검정**을 쓴다(`fisher_exact_less`).
+scipy 없이 `math.comb`로 직접 계산 — n이 작아 정확 계산이 충분히 빠르다.
+
+GNN 쿼리 실측:
+
+| 지적 | 지적받음 | 미지적 | Fisher p | 유의 |
+|---|---|---|---|---|
+| 신규성 부족 | 2/11 (18%) | 6/9 (67%) | 0.040 | ✔ |
+| 중요성·동기 | 3/13 (23%) | 5/7 (71%) | 0.052 | — |
+| 재현성 | 0/4 (0%) | 8/16 (50%) | 0.102 | — |
+
+재현성은 "0% 통과"라 가장 극적으로 보이지만 n=4라 유의하지 않다. 검정 없이 이걸
+결론으로 냈으면 노이즈를 사실로 파는 셈이었다. `is_contrast_significant`가
+False면 UI·요약 모두 단정하지 않는다.
+
+**decision 처리**: `unknown`은 분모에서 제외, `withdrawn`은 '통과 못함'으로 센다
+(리뷰가 나쁘게 나온 뒤 철회한 경우가 대부분이라 reject와 같은 신호).
+지적항목이 하나도 없는 이웃도 대조군 분모에 들어가야 하므로 `all_paper_ids`를
+별도로 넘긴다 — points에 등장한 논문만 쓰면 대조군이 비어버린다.
+
+### 18.4 Sonnet 종합 프롬프트 보강
+
+구조화 사실에 lift·base_rate·contrast_significant를 함께 실었다. 빈도만 주면
+모델이 "베이스라인 비교를 강화하세요" 같은 코퍼스 상수를 결론처럼 써버린다.
+프롬프트에 "lift가 1.0 근처면 ML 논문 전반의 규범이므로 이 주제의 발견처럼
+제시하지 말 것", "contrast_significant가 false면 단정하지 말 것", "두드러진 게
+없으면 없다고 말할 것"을 명시했다.
+
+### 18.5 남은 문제 (다음 순위)
+
+- `examples`에 강점 문장이 섞인다. needs_llm_split venue(62,346건)는 리뷰 본문
+  전체가 `weaknesses`에 들어와 HeuristicExtractor가 강/약을 못 가린다.
+  → 리뷰 추출 품질 개선(2순위 rating 노출과 함께 검토).
+- `similarity_percentile`이 top-K에서 전부 100으로 포화 — 참조 분포가 무작위쌍이라
+  구조적으로 변별 불가. 폐기 또는 재정의 필요(3순위).

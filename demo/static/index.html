@@ -48,6 +48,9 @@
   .bar-count { min-width:52px; text-align:right; color:var(--muted);
                font-variant-numeric:tabular-nums; }
   .ex { font-size:12px; color:var(--muted); margin:3px 0 0 160px; }
+  .ex b { color:var(--ink); }
+  .ex.risk { color:var(--reject); }
+  .star { color:var(--accent); }
   .flow { font-size:13px; margin:5px 0; }
   .arrow { color:var(--accent); font-weight:700; }
   .summary { white-space:pre-wrap; font-size:14px; }
@@ -132,16 +135,26 @@ function render(d) {
   }
   h += `</div>`;
 
-  // 리뷰 지적 패턴
+  // 리뷰 지적 패턴 — 빈도가 아니라 '코퍼스 평균 대비 얼마나 두드러지는가'를 보여준다.
+  // 그냥 빈도로 줄세우면 baselines(코퍼스 78.8%)가 항상 1등이라 정보가 없다.
   h += `<div class="card"><div class="sec-title">💬 반복되는 리뷰 지적</div>`;
   if (!d.review_patterns.length) h += `<div class="muted">지적 패턴 데이터가 아직 없습니다 (수집 진행 중일 수 있음).</div>`;
-  const maxc = Math.max(1, ...d.review_patterns.map(p=>p.paper_count));
+  const hasLift = d.review_patterns.some(p=>p.lift != null);
+  if (hasLift && !d.review_patterns.some(p=>p.is_distinctive))
+    h += `<div class="muted" style="margin-bottom:8px">이 주제 특유의 지적은 없습니다 — 아래는 모두 ML 논문 전반의 평균적인 지적 수준입니다.</div>`;
   for (const p of d.review_patterns) {
     const w = (100*p.paper_count/p.total_papers).toFixed(0);
+    const star = p.is_distinctive ? `<span class="star" title="코퍼스 평균 대비 유의하게 높음">★</span> ` : '';
     h += `<div class="bar-row">
-      <span class="bar-label">${esc(p.label)}</span>
+      <span class="bar-label">${star}${esc(p.label)}</span>
       <span class="bar-track"><span class="bar-fill" style="width:${w}%"></span></span>
       <span class="bar-count">${p.paper_count}/${p.total_papers}편</span></div>`;
+    // 코퍼스 base rate 대비 배수. 1.0 근처면 '어디서나 나오는 지적'이라는 뜻.
+    if (p.lift != null)
+      h += `<div class="ex">코퍼스 평균 ${(100*p.base_rate).toFixed(0)}% 대비 <b>${p.lift.toFixed(2)}배</b>${p.is_distinctive ? '' : ' — 평균 수준'}</div>`;
+    // 당락 대조는 유의할 때만 단정한다. 표본이 작으면(이웃 20편 중 4편 등) 노이즈다.
+    if (p.is_contrast_significant)
+      h += `<div class="ex risk">이 지적을 받은 ${p.decided_with}편 중 ${p.accept_with}편만 통과(${(100*p.accept_rate_with).toFixed(0)}%) · 지적이 없던 ${p.decided_without}편은 ${(100*p.accept_rate_without).toFixed(0)}% 통과</div>`;
     if (p.examples && p.examples[0]) h += `<div class="ex">예: ${esc(p.examples[0])}</div>`;
   }
   h += `</div>`;

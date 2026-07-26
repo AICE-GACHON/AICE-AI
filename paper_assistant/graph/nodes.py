@@ -9,6 +9,7 @@ import json
 import logging
 
 from paper_assistant.db.connection import cursor
+from paper_assistant.graph.base_rates import load_base_rates
 from paper_assistant.graph.clustering import aggregate_by_aspect
 from paper_assistant.graph.llm import HAIKU, SONNET
 from paper_assistant.graph.state import PipelineState
@@ -74,6 +75,8 @@ def review_analysis_node(state: PipelineState, embedder, llm) -> dict:
     """유사 논문들의 지적항목을 aspect별로 집계 (쿼리 시점, 임베딩 불필요).
 
     SPECTER2 임베딩 클러스터링은 리뷰 문장에 부적합해(§14) aspect 기반 집계를 쓴다.
+    빈도가 아니라 **코퍼스 base rate 대비 lift**로 정렬하고, 이웃의 당락 정보를
+    함께 넘겨 "이 지적을 받고도 붙었는가"를 대조한다 (§18).
     """
     papers = state.get("similar_papers", [])
     paper_ids = [p.paper_id for p in papers]
@@ -90,7 +93,13 @@ def review_analysis_node(state: PipelineState, embedder, llm) -> dict:
         points = [{"paper_id": r[0], "aspect": r[1], "text": r[2]}
                   for r in cur.fetchall()]
 
-    patterns = aggregate_by_aspect(points, total_papers=len(paper_ids))
+    patterns = aggregate_by_aspect(
+        points,
+        total_papers=len(paper_ids),
+        base_rates=load_base_rates(),
+        decisions={p.paper_id: p.decision for p in papers},
+        all_paper_ids=set(paper_ids),
+    )
     return {"review_patterns": patterns}
 
 
@@ -163,15 +172,41 @@ def synthesis_node(state: PipelineState, embedder, llm) -> dict:
     return {"report": report}
 
 
+def _risky_first(patterns, significant_only: bool = True):
+    """당락 격차가 큰 지적 순. accept율 차이가 곧 '치명도'다.
+
+    기본은 Fisher 검정을 통과한 것만 — 이웃 20편에서 "4편 중 0편 통과" 같은
+    표본은 그럴듯해 보이지만 우연이다 (§18).
+    """
+    scored = [(p, p.accept_rate_without - p.accept_rate_with)
+              for p in patterns
+              if p.accept_rate_with is not None and p.accept_rate_without is not None
+              and (p.is_contrast_significant or not significant_only)]
+    return sorted(scored, key=lambda kv: kv[1], reverse=True)
+
+
 def _summary(state, similar, patterns, trends, llm) -> str:
+    distinctive = [p for p in patterns if p.is_distinctive]
+    risky = _risky_first(patterns)
+
     if llm is None:
         # 스텁: 구조화 데이터로 결정론적 요약
         lines = [f"## 유사 논문 {len(similar)}편"]
-        if patterns:
-            top = patterns[0]
+        if distinctive:
+            lines.append("- 이 주제 특유의 지적: " + ", ".join(
+                f"{p.label}({p.paper_count}/{p.total_papers}, lift {p.lift})"
+                for p in distinctive[:3]))
+        else:
+            lines.append("- 이 주제 특유의 지적 없음 (전부 코퍼스 평균 수준)")
+        if risky:
+            p, _ = risky[0]
             lines.append(
-                f"- 반복 지적: \"{top.label[:60]}\" "
-                f"({top.paper_count}/{top.total_papers}편)")
+                f"- 당락에 실제로 영향: {p.label} — 지적받은 {p.decided_with}편 중 "
+                f"{p.accept_with}편 통과({p.accept_rate_with*100:.0f}%) vs "
+                f"미지적 {p.decided_without}편 중 {p.accept_without}편"
+                f"({p.accept_rate_without*100:.0f}%), p={p.contrast_p_value}")
+        else:
+            lines.append("- 당락 격차가 유의한 지적 없음 (이웃 표본이 작아 판단 보류)")
         if trends:
             lines.append("- 게재 경향: " + ", ".join(
                 f"{t.venue} {t.accept_count}/{t.paper_count}" for t in trends[:3]))
@@ -181,15 +216,34 @@ def _summary(state, similar, patterns, trends, llm) -> str:
         "query": state["query_title"],
         "similar_papers": [{"title": s.title, "venue": s.venue,
                             "decision": s.decision} for s in similar[:10]],
-        "review_patterns": [{"label": p.label, "count": f"{p.paper_count}/{p.total_papers}"}
-                            for p in patterns],
+        # lift와 당락 대조를 같이 넘긴다. 빈도만 주면 모델이 "베이스라인 비교를
+        # 강화하세요" 같은 코퍼스 상수를 결론처럼 써버린다 (§18).
+        "review_patterns": [{
+            "label": p.label,
+            "observed": f"{p.paper_count}/{p.total_papers}",
+            "corpus_base_rate": p.base_rate,
+            "lift": p.lift,
+            "distinctive": p.is_distinctive,
+            "accept_rate_if_criticized": p.accept_rate_with,
+            "accept_rate_if_not": p.accept_rate_without,
+            "contrast_sample": f"{p.decided_with} vs {p.decided_without}",
+            "contrast_significant": p.is_contrast_significant,
+        } for p in patterns],
         "venue_trends": [{"venue": t.venue, "accept": f"{t.accept_count}/{t.paper_count}"}
                          for t in trends],
     }
     system = (
         "You are a research assistant. Given structured findings about papers similar "
         "to a query, write a concise Korean markdown briefing (under 250 words) covering: "
-        "what similar work exists, what review criticisms recur, and where such papers "
-        "get published. Be concrete; cite the counts. Do not invent facts.")
+        "what similar work exists, which review criticisms are DISTINCTIVE to this topic, "
+        "and where such papers get published. Be concrete; cite the counts.\n"
+        "Critical: a criticism with lift near 1.0 is the corpus-wide norm for ML papers "
+        "(e.g. 79% of all papers are criticized on baselines) — never present it as a "
+        "finding about this topic. Lead with distinctive=true patterns, and with "
+        "criticisms whose accept_rate_if_criticized is far below accept_rate_if_not. "
+        "Only state an accept-rate gap as a conclusion when contrast_significant is true; "
+        "otherwise the sample is too small — mention it as tentative or omit it. "
+        "If nothing is distinctive, say so plainly rather than manufacturing an "
+        "insight. Do not invent facts.")
     return llm.text(SONNET, system, json.dumps(facts, ensure_ascii=False),
                     max_tokens=1200)
