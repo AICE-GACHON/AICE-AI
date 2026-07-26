@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>논문 RAG 데모 — AI 파트</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1c2430; --muted:#6b7686;
+          --line:#e5e8ec; --accent:#3b6ef5; --accept:#1a9c6b; --reject:#c2453d; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",
+         "Malgun Gothic",sans-serif; background:var(--bg); color:var(--ink);
+         line-height:1.55; }
+  .wrap { max-width:960px; margin:0 auto; padding:28px 20px 80px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:22px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:18px 20px; margin-bottom:18px; }
+  label { display:block; font-size:13px; font-weight:600; margin:12px 0 5px; }
+  input[type=text], textarea { width:100%; padding:9px 11px; border:1px solid var(--line);
+          border-radius:8px; font:inherit; font-size:14px; background:#fbfcfd; }
+  textarea { resize:vertical; min-height:90px; }
+  .row { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin-top:14px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px;
+           padding:10px 20px; font:inherit; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.55; cursor:default; }
+  .file { font-size:13px; color:var(--muted); }
+  .toggle { font-size:13px; color:var(--muted); display:flex; align-items:center; gap:6px; }
+  .hint { font-size:12px; color:var(--muted); margin-top:6px; }
+  .sec-title { font-size:14px; font-weight:700; margin:0 0 12px;
+               display:flex; align-items:center; gap:8px; }
+  .pill { font-size:11px; font-weight:600; padding:2px 8px; border-radius:999px;
+          background:#eef1f6; color:var(--muted); }
+  .paper { padding:11px 0; border-top:1px solid var(--line); }
+  .paper:first-child { border-top:0; }
+  .paper-top { display:flex; gap:10px; align-items:baseline; }
+  .rank { color:var(--muted); font-variant-numeric:tabular-nums; font-size:13px; min-width:22px; }
+  .ptitle { font-weight:600; font-size:14px; flex:1; }
+  .meta { font-size:12px; color:var(--muted); margin:2px 0 0 32px; }
+  .dec-accept { color:var(--accept); font-weight:600; }
+  .dec-reject { color:var(--reject); font-weight:600; }
+  .tag { display:inline-block; font-size:11px; background:#eef3ff; color:#2c53c0;
+         border-radius:6px; padding:1px 7px; margin:3px 4px 0 0; }
+  .bar-row { display:flex; align-items:center; gap:10px; margin:7px 0; font-size:13px; }
+  .bar-label { min-width:150px; }
+  .bar-track { flex:1; background:#eef1f6; border-radius:6px; height:16px; overflow:hidden; }
+  .bar-fill { height:100%; background:var(--accent); }
+  .bar-count { min-width:52px; text-align:right; color:var(--muted);
+               font-variant-numeric:tabular-nums; }
+  .ex { font-size:12px; color:var(--muted); margin:3px 0 0 160px; }
+  .flow { font-size:13px; margin:5px 0; }
+  .arrow { color:var(--accent); font-weight:700; }
+  .summary { white-space:pre-wrap; font-size:14px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .spinner { display:inline-block; width:15px; height:15px; border:2px solid #fff;
+             border-top-color:transparent; border-radius:50%; animation:spin .8s linear infinite;
+             vertical-align:-2px; margin-right:7px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .err { color:var(--reject); font-size:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>논문 RAG — AI 파트 데모</h1>
+  <div class="sub">초록을 붙여넣거나 PDF를 올리면 유사 논문 · 리뷰 지적 패턴 · 게재 경향을 보여줍니다.
+    <br>※ 시연용 임시 화면 (실제 프론트는 별도).</div>
+
+  <div class="card">
+    <label>제목</label>
+    <input type="text" id="title" placeholder="예: Graph Neural Networks for Molecular Property Prediction">
+    <label>초록</label>
+    <textarea id="abstract" placeholder="논문 초록을 붙여넣으세요."></textarea>
+    <label>또는 PDF 업로드 <span class="muted">(제목/초록 자동 추출)</span></label>
+    <input type="file" id="pdf" accept="application/pdf" class="file">
+    <div class="row">
+      <button id="go">분석</button>
+      <label class="toggle"><input type="checkbox" id="llm"> AI 요약·태깅 사용 <span class="muted">(크레딧 소모)</span></label>
+    </div>
+    <div class="hint">체크 안 하면 무료 모드로 동작합니다 (요약·태깅은 간이 버전).</div>
+  </div>
+
+  <div id="result"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => (s||"").replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const isAccept = d => (d||"").startsWith("accept");
+const decClass = d => isAccept(d) ? "dec-accept" : "dec-reject";
+
+$("go").onclick = async () => {
+  const btn = $("go"), res = $("result");
+  const fd = new FormData();
+  fd.append("title", $("title").value);
+  fd.append("abstract", $("abstract").value);
+  fd.append("use_llm", $("llm").checked ? "1" : "0");
+  if ($("pdf").files[0]) fd.append("pdf", $("pdf").files[0]);
+
+  btn.disabled = true;
+  res.innerHTML = `<div class="card"><span class="spinner"></span>분석 중… (첫 실행은 모델 로드로 수십 초 걸릴 수 있어요)</div>`;
+  try {
+    const r = await fetch("/api/analyze", { method:"POST", body:fd });
+    const data = await r.json();
+    if (!r.ok) { res.innerHTML = `<div class="card err">오류: ${esc(data.error||r.status)}</div>`; return; }
+    res.innerHTML = render(data);
+  } catch (e) {
+    res.innerHTML = `<div class="card err">요청 실패: ${esc(String(e))}</div>`;
+  } finally { btn.disabled = false; }
+};
+
+function render(d) {
+  let h = "";
+
+  // 쿼리 확인 (PDF 추출 결과 확인용)
+  h += `<div class="card"><div class="sec-title">🔍 입력</div>
+    <div><b>${esc(d.query_title)||"<span class='muted'>제목 없음</span>"}</b></div>
+    <div class="muted" style="margin-top:6px">${esc((d.query_abstract||"").slice(0,300))}${(d.query_abstract||"").length>300?"…":""}</div></div>`;
+
+  // 유사 논문
+  h += `<div class="card"><div class="sec-title">📄 유사 논문 <span class="pill">${d.similar_papers.length}편</span></div>`;
+  if (!d.similar_papers.length) h += `<div class="muted">결과 없음.</div>`;
+  for (const p of d.similar_papers) {
+    const pct = p.similarity_percentile
+      ? ` · 유사도 상위 ${Math.max(1, Math.round(100-p.similarity_percentile))}%` : "";
+    h += `<div class="paper"><div class="paper-top">
+      <span class="rank">${p.rank}.</span>
+      <span class="ptitle">${esc(p.title)}</span>
+      <span class="${decClass(p.decision)}">${esc(p.decision)}</span></div>
+      <div class="meta">${esc(p.venue)}${pct}`;
+    for (const t of (p.tags||[])) h += `<span class="tag">${esc(t.kind)}: ${esc(t.reason)}</span>`;
+    h += `</div></div>`;
+  }
+  h += `</div>`;
+
+  // 리뷰 지적 패턴
+  h += `<div class="card"><div class="sec-title">💬 반복되는 리뷰 지적</div>`;
+  if (!d.review_patterns.length) h += `<div class="muted">지적 패턴 데이터가 아직 없습니다 (수집 진행 중일 수 있음).</div>`;
+  const maxc = Math.max(1, ...d.review_patterns.map(p=>p.paper_count));
+  for (const p of d.review_patterns) {
+    const w = (100*p.paper_count/p.total_papers).toFixed(0);
+    h += `<div class="bar-row">
+      <span class="bar-label">${esc(p.label)}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${w}%"></span></span>
+      <span class="bar-count">${p.paper_count}/${p.total_papers}편</span></div>`;
+    if (p.examples && p.examples[0]) h += `<div class="ex">예: ${esc(p.examples[0])}</div>`;
+  }
+  h += `</div>`;
+
+  // 게재 경향
+  h += `<div class="card"><div class="sec-title">🏛️ 게재 경향</div>`;
+  if (!d.venue_trends.length) h += `<div class="muted">데이터 없음.</div>`;
+  for (const t of d.venue_trends) {
+    const w = (100*t.accept_rate).toFixed(0);
+    h += `<div class="bar-row">
+      <span class="bar-label">${esc(t.venue)}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${w}%;background:var(--accept)"></span></span>
+      <span class="bar-count">${t.accept_count}/${t.paper_count} (${w}%)</span></div>`;
+  }
+  // 재투고 흐름
+  if (d.resubmission_flows && d.resubmission_flows.length) {
+    h += `<div style="margin-top:12px"><div class="muted" style="margin-bottom:6px">재투고 흐름</div>`;
+    for (const f of d.resubmission_flows)
+      h += `<div class="flow">${esc(f.from_venue)} <span class="arrow">→</span> ${esc(f.to_venue)} <span class="muted">${f.count}건</span></div>`;
+    h += `</div>`;
+  }
+  h += `</div>`;
+
+  // 종합 요약
+  if (d.summary_markdown) h += `<div class="card"><div class="sec-title">📝 종합</div><div class="summary">${esc(d.summary_markdown)}</div></div>`;
+
+  return h;
+}
+</script>
+</body>
+</html>

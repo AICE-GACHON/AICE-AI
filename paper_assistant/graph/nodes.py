@@ -24,10 +24,11 @@ TAG_KINDS = ("methodology", "dataset", "problem_setting", "citation")
 
 # ---------------------------------------------------------------- input
 def input_node(state: PipelineState, embedder, llm) -> dict:
-    """PDF면 제목/초록 추출, 텍스트면 통과. (PDF 추출은 pdf 모듈에 위임 예정)"""
+    """PDF면 제목/초록 추출, 텍스트면 통과."""
     if state.get("pdf_bytes") and not state.get("query_abstract"):
-        # PDF 경로는 pdf/extract.py 구현 후 연결 (MVP는 텍스트 우선)
-        raise NotImplementedError("PDF 입력은 pdf/extract.py 구현 후 지원")
+        from paper_assistant.pdf.extract import extract_title_abstract
+        title, abstract = extract_title_abstract(state["pdf_bytes"], llm=llm)
+        return {"query_title": title, "query_abstract": abstract}
     return {}
 
 

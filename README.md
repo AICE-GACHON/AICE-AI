@@ -140,12 +140,26 @@ tests/                         # 회귀 테스트 47건
 docker exec -i paper-assistant-db psql -U paper -d paper_assistant < scripts/build_indexes.sql
 ```
 
+`demo/`는 팀 시연용 임시 웹 화면 (독립 폴더, 나중에 삭제 가능) — [demo/README.md](demo/README.md).
+
 전체 목표 구조와 로드맵은 [AI_파트_설계서.md](AI_파트_설계서.md) §7–8 참고.
 
-## 백엔드 통합 계약 (예정)
+## 데모 웹 (팀 시연용)
+
+```bash
+pip install -r demo/requirements.txt
+python -m uvicorn demo.server:app --port 8000     # http://localhost:8000
+```
+
+제목+초록 입력 또는 PDF 업로드 → 유사 논문·리뷰 패턴·게재 경향·재투고 흐름.
+`paper_assistant.analyze()` 하나만 호출하므로 **백엔드 통합 계약을 그대로 시연**한다.
+실제 프론트가 준비되면 `demo/` 폴더를 통째로 삭제하면 된다.
+
+## 백엔드 통합 계약
 
 AI 파트는 Python 패키지로 제공되며, 공개 API는 다음 하나로 고정:
 
 ```python
-paper_assistant.analyze(title, abstract, pdf_bytes=None) -> Report  # Pydantic 모델
+from paper_assistant import analyze
+report = analyze(title, abstract, pdf_bytes=None)  # -> Report (Pydantic)
 ```

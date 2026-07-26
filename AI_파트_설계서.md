@@ -303,7 +303,7 @@ LangGraph의 `astream()`을 그대로 노출하는 `analyze_stream()` 추가.
 1. ~~**주차 1 — 데이터 파일럿**~~ **(진행 중)**: OpenReview API 탐색 ✅, 정규화 레이어 + 10개 venue 검증 ✅ → 남은 것: 리뷰 추출 프롬프트 튜닝 + 편당 LLM 비용 측정 (Anthropic 키 필요)
 2. ~~**주차 2 — 검색 코어**~~ **✅ 완료** (§11, §12): SPECTER2 임베딩 + pgvector 적재 + 하이브리드 검색, 200편 end-to-end 검증 통과
 3. ~~**주차 3 — LangGraph 파이프라인**~~ **✅ 완료** (§14): 6개 노드 조립, 병렬 분석, $0 배선 검증. 남은 것: 재투고 매칭·PDF·Haiku 태깅 실측
-4. **주차 4 — 전체 수집** *(진행 중)*: 43k 배치 실행(백그라운드, ~9h), ~~재투고 매칭~~ ✅(§15)
+4. ~~**주차 4 — 전체 수집**~~ **✅ 완료**: 43,515편 적재(710분) + HNSW 인덱스 + 재투고 매칭 744건(ICLR↔NeurIPS reject→accept 흐름 확인)
 5. **주차 5 — 마감**: PDF 입력, demo_server, Report 스키마 문서화 → 백엔드 팀 전달
 
 ---
@@ -474,10 +474,14 @@ docker compose up -d      # 최초 기동 시 scripts/init_db.sql 자동 실행
 `PythonFinalizationError: cannot join thread at interpreter shutdown`이 발생한다
 (3.14부터 종료 시점 스레드 join이 금지됨). `atexit.register(close_pool)`로 해결.
 
-### 12.4 남은 성능 과제
+### 12.4 HNSW 인덱스 (완료)
 
-현재 200편에서 16ms지만 **43,515편 전체에서는 HNSW 인덱스 없이 순차 스캔이 되어
-느려진다.** 전체 적재 후 `build_indexes.sql`을 실행하고 재측정할 것.
+전체 43,515편 적재 후 `build_indexes.sql`로 HNSW 인덱스 생성 완료(직렬 빌드 20초).
+
+**Docker 함정**: 병렬 인덱스 빌드가 공유 메모리를 쓰는데 컨테이너 기본 `/dev/shm`
+(64MB)이 작아 `could not resize shared memory segment`로 실패한다. 해결:
+`SET max_parallel_maintenance_workers = 0`(직렬 빌드) + docker-compose `shm_size: 1gb`.
+`review_points.embedding`은 전부 NULL(쿼리 시점 임베딩)이라 인덱스 생략.
 
 ---
 
@@ -583,7 +587,7 @@ similarity_percentile만** 담는다 (§11.2). JSON 직렬화 왕복 테스트 �
 ### 14.5 남은 것
 
 - ~~**재투고 흐름**~~ **✅ 완료** (§15)
-- **PDF 입력**: `pdf/extract.py` (PyMuPDF + Haiku)
+- ~~**PDF 입력**~~ **✅ 완료** (§16) — pypdf 휴리스틱, llm 있으면 Haiku 정제
 - **similarity_tagging 실측**: 크레딧으로 Haiku 태깅 품질 확인 (아직 스텁만 검증)
 
 ---
@@ -619,3 +623,26 @@ NeurIPS venue 적재 후 ICLR↔NeurIPS 흐름이 다수 잡힐 것으로 예상
 
 일부 논문 초록/리뷰에 NUL(0x00) 바이트 → Postgres text 컬럼이 거부(ICLR 2021에서 발생).
 `normalize.clean_text()`가 제어 문자를 제거(탭·개행 보존)하도록 수정. 수집 재개.
+
+---
+
+## 16. PDF 입력 + 데모 웹 (2026-07-22)
+
+### 16.1 PDF 입력 (`pdf/extract.py`) — 실제 기능
+
+`analyze(pdf_bytes=...)` 지원. pypdf로 첫 2페이지 텍스트를 뽑아 휴리스틱으로
+제목/초록 추출: 제목 = Abstract 이전 첫 의미줄, 초록 = "Abstract"~"Introduction" 사이.
+`llm`이 주어지면 Haiku로 정제(선택). `input_node`에 연결됨.
+
+### 16.2 데모 웹 서버 (`demo/`) — 독립·삭제 가능
+
+팀 시연용 임시 화면. **AI 파트와 완전 독립** — `paper_assistant.analyze()` 하나만
+호출한다(= 백엔드 통합 계약 그대로 시연). 실제 프론트 준비 시 `demo/` 폴더째 삭제.
+
+- FastAPI(`demo/server.py`) + 단일 HTML(`demo/static/index.html`)
+- 텍스트(제목+초록) 또는 PDF 업로드 → 유사논문·리뷰패턴·게재경향·재투고흐름 렌더
+- 기본 무료 모드($0), "AI 요약·태깅" 체크 시 Claude 호출
+- `python -m uvicorn demo.server:app --port 8000`
+
+**브라우저 end-to-end 검증 완료**: "분자 특성 예측 GNN" 쿼리 → 유사 GNN 논문 20편,
+리뷰 패턴(baselines 19/20 등), 게재 경향 정상 렌더. 백엔드 계약이 실제로 동작함을 확인.
