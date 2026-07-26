@@ -11,8 +11,9 @@ CREATE TABLE papers (
     id            BIGSERIAL PRIMARY KEY,
     openreview_id TEXT UNIQUE NOT NULL,
     forum_id      TEXT,
-    arxiv_id      TEXT,
-    s2_paper_id   TEXT,
+    arxiv_id      TEXT,           -- arxiv_matcher가 로컬 arXiv 캐시로 채운다
+    s2_paper_id   TEXT,           -- s2_enricher가 채운다
+    citation_count INT,           -- S2 citationCount (보강 시점 스냅샷)
 
     title         TEXT NOT NULL,
     abstract      TEXT,
@@ -40,6 +41,7 @@ CREATE INDEX papers_tsv_idx      ON papers USING gin (tsv);
 CREATE INDEX papers_venue_year   ON papers (venue, year);
 CREATE INDEX papers_decision     ON papers (decision);
 CREATE INDEX papers_arxiv        ON papers (arxiv_id) WHERE arxiv_id IS NOT NULL;
+CREATE INDEX papers_s2           ON papers (s2_paper_id) WHERE s2_paper_id IS NOT NULL;
 CREATE INDEX papers_title_trgm   ON papers USING gin (title gin_trgm_ops);
 
 -- 벡터 인덱스는 데이터 적재 후 생성하는 것이 훨씬 빠르다.
@@ -101,7 +103,10 @@ CREATE TABLE review_points (
     -- theoretical_soundness / reproducibility / related_work /
     -- significance / other
     aspect    TEXT NOT NULL,
-    sentiment TEXT NOT NULL,          -- weakness / strength / question
+    -- weakness / strength / question / unknown
+    -- unknown: 강약점 미분리 리뷰인데 약점 섹션 머리말도 없어 지적인지 확정
+    -- 불가한 문장. 집계에서 제외한다 (review_extractor.split_weakness_section).
+    sentiment TEXT NOT NULL,
     text      TEXT NOT NULL,          -- 1~2문장 요약
     embedding vector(768)
 );

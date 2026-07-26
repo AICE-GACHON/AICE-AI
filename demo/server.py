@@ -16,7 +16,7 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from paper_assistant import analyze
+from paper_assistant import analyze, get_paper_detail
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("demo")
@@ -62,6 +62,19 @@ async def api_analyze(
         log.exception("analyze 실패")
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
     return JSONResponse(report.model_dump())
+
+
+@app.get("/api/paper/{paper_id}")
+def api_paper(paper_id: int):
+    """유사 논문 상세 (초록·메타리뷰·리뷰 전문). 목록에서 펼칠 때 lazy load."""
+    try:
+        detail = get_paper_detail(paper_id)
+    except Exception as e:
+        log.exception("get_paper_detail 실패")
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+    if detail is None:
+        return JSONResponse({"error": "논문을 찾을 수 없습니다."}, status_code=404)
+    return JSONResponse(detail.model_dump())
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

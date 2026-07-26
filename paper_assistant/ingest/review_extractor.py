@@ -54,6 +54,55 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
 MIN_POINT_CHARS = 25   # 이보다 짧으면 지적 항목으로 보지 않는다
 MAX_POINTS_PER_REVIEW = 12
 
+# --- 미분리 리뷰의 강/약점 섹션 복구 -------------------------------------
+# 2023년 이전 venue는 강/약점 필드가 없어 리뷰 본문 전체가 weaknesses로 들어온다.
+# 그 본문을 통째로 '지적'으로 라벨링하면 강점·요약 문장까지 weakness가 되어
+# 논문당 지적 수가 1.47배(27.9 vs 18.9건)로 부풀고 aspect 지적률도 최대 1.39배
+# 왜곡된다. 다만 실측 결과 미분리 리뷰 62,346건 중 **46.0%**는 'Cons' /
+# 'Weaknesses' / 'Concerns' 같은 머리말을 그대로 갖고 있어 정규식으로 되살릴 수
+# 있다. 나머지(머리말 없는 산문형)는 sentiment='unknown'으로 빼서 집계에서 제외한다.
+_WEAK_HEAD = re.compile(
+    r"^[ \t]*(?:\*{0,2}|#{0,3})[ \t]*(?:cons|weakness(?:es)?|limitations?|"
+    r"drawbacks?|concerns?|criticisms?|negatives?|issues?)\b[ \t]*:?[ \t]*",
+    re.IGNORECASE | re.MULTILINE)
+_STRONG_HEAD = re.compile(
+    r"^[ \t]*(?:\*{0,2}|#{0,3})[ \t]*(?:pros|strengths?|positives?|"
+    r"advantages?|summary|questions?)\b[ \t]*:?[ \t]*",
+    re.IGNORECASE | re.MULTILINE)
+# 잘라낸 섹션이 이보다 짧으면 머리말만 있고 내용이 없는 것으로 본다
+MIN_SECTION_CHARS = 40
+
+
+def split_weakness_section(text: str) -> str | None:
+    """미분리 리뷰 본문에서 약점 섹션만 잘라낸다. 머리말이 없으면 None.
+
+    약점 머리말부터 '다음 머리말(강점이든 약점이든)' 직전까지를 한 구간으로 보고,
+    여러 구간이 있으면 모두 이어 붙인다. 'Pros ... Cons ... Questions' 처럼
+    섹션이 이어지는 형식을 그대로 따라간다.
+    """
+    if not text:
+        return None
+
+    # (위치, 머리말 끝, 약점인가) 목록을 만들어 위치순으로 훑는다
+    heads = [(m.start(), m.end(), True) for m in _WEAK_HEAD.finditer(text)]
+    heads += [(m.start(), m.end(), False) for m in _STRONG_HEAD.finditer(text)]
+    if not any(is_weak for _, _, is_weak in heads):
+        return None
+    heads.sort()
+
+    sections = []
+    for i, (_start, head_end, is_weak) in enumerate(heads):
+        if not is_weak:
+            continue
+        next_start = heads[i + 1][0] if i + 1 < len(heads) else len(text)
+        body = text[head_end:next_start].strip()
+        if len(body) >= MIN_SECTION_CHARS:
+            sections.append(body)
+
+    if not sections:
+        return None
+    return "\n".join(sections)
+
 
 @dataclass
 class ExtractedPoint:
@@ -100,13 +149,23 @@ class HeuristicExtractor:
     def extract(self, review: NormalizedReview) -> list[ExtractedPoint]:
         points: list[ExtractedPoint] = []
 
-        # 강/약이 분리된 venue는 weaknesses 필드가 곧 약점 목록.
-        # 분리 안 된 venue(needs_llm_split)는 리뷰 본문 전체가 weaknesses에 들어와
-        # 강점·약점이 섞여 있지만, 클러스터링 관점에선 '지적 후보'로 묶어도 무방하다.
-        for chunk in _split_points(review.weaknesses):
+        # 강/약이 분리된 venue는 weaknesses 필드가 곧 약점 목록이라 그대로 쓴다.
+        # 미분리 venue는 본문 전체가 들어오므로 (1) 약점 섹션을 정규식으로 되살려
+        # 보고, (2) 실패하면 weakness라 단정하지 않고 'unknown'으로 남긴다.
+        # 예전에는 본문 전체를 weakness로 넣었는데, 그러면 강점·요약 문장까지
+        # 지적으로 집계되어 지적률이 계통적으로 부풀었다.
+        body, sentiment = review.weaknesses, "weakness"
+        if review.needs_llm_split:
+            recovered = split_weakness_section(review.weaknesses)
+            if recovered is not None:
+                body = recovered
+            else:
+                sentiment = "unknown"
+
+        for chunk in _split_points(body):
             points.append(ExtractedPoint(
                 aspect=classify_aspect(chunk),
-                sentiment="weakness",
+                sentiment=sentiment,
                 text=chunk,
             ))
 

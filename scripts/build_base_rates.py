@@ -23,8 +23,23 @@ CREATE TABLE IF NOT EXISTS aspect_base_rates (
 );
 """
 
-# 분모는 "해당 sentiment의 지적항목이 하나라도 추출된 논문 수".
-# 리뷰가 없거나 추출이 안 된 논문을 분모에 넣으면 base rate가 과소평가된다.
+# 분모는 "**모든 리뷰가 파싱된** 논문 수"다. 리뷰 일부만 파싱된 논문을 넣으면
+# 안 된다 — 강/약점 미분리 리뷰 중 약점 섹션을 못 살린 것은 지적을 볼 수 없어
+# 거짓 음성이 되고, base rate가 계통적으로 과소평가된다. 실측: 부분 복구 논문을
+# 포함하면 미분리 논문의 지적률이 분리 포맷 대비 0.55~0.76배로 내려앉지만,
+# 완전 파싱 논문만 비교하면 0.79~1.04배로 정상이다.
+MEASURABLE = """
+CREATE TEMP TABLE measurable_papers AS
+SELECT r.paper_id
+FROM reviews r
+LEFT JOIN (
+    SELECT DISTINCT review_id FROM review_points WHERE sentiment = %(sentiment)s
+) x ON x.review_id = r.id
+GROUP BY r.paper_id
+HAVING bool_and(NOT r.needs_llm_split OR x.review_id IS NOT NULL)
+"""
+MEASURABLE_INDEX = "CREATE INDEX ON measurable_papers (paper_id)"
+
 COMPUTE = """
 INSERT INTO aspect_base_rates (aspect, sentiment, paper_count, total_papers, base_rate)
 SELECT rp.aspect,
@@ -33,10 +48,8 @@ SELECT rp.aspect,
        t.total,
        count(DISTINCT rp.paper_id)::real / NULLIF(t.total, 0)
 FROM review_points rp
-CROSS JOIN (
-    SELECT count(DISTINCT paper_id) AS total
-    FROM review_points WHERE sentiment = %(sentiment)s
-) t
+JOIN measurable_papers m ON m.paper_id = rp.paper_id
+CROSS JOIN (SELECT count(*) AS total FROM measurable_papers) t
 WHERE rp.sentiment = %(sentiment)s
 GROUP BY rp.aspect, t.total
 ON CONFLICT (aspect, sentiment) DO UPDATE
@@ -50,6 +63,8 @@ SET paper_count  = EXCLUDED.paper_count,
 def main(sentiment: str = "weakness") -> None:
     with cursor() as cur:
         cur.execute(DDL)
+        cur.execute(MEASURABLE, {"sentiment": sentiment})
+        cur.execute(MEASURABLE_INDEX)
         cur.execute(COMPUTE, {"sentiment": sentiment})
         cur.execute(
             "SELECT aspect, paper_count, total_papers, base_rate "

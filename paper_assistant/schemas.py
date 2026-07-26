@@ -42,6 +42,69 @@ class SimilarPaper(BaseModel):
         default=None, description="당락 경계 대비 차이. 편향 venue는 None")
 
 
+class ReviewDetail(BaseModel):
+    """개별 리뷰 원문 (상세 보기 전용).
+
+    2023년 이전 venue는 강/약점이 분리되지 않아 weaknesses에 본문 전체가 들어온다
+    (init_db.sql의 needs_llm_split 주석 참고). 프론트는 이 경우를 '리뷰 본문'으로
+    한 덩어리 표시해야 한다.
+    """
+    rating: float | None = None
+    rating_raw: str | None = Field(
+        default=None, description="'8: Accept' 등 원문. 척도가 연도마다 다름")
+    confidence: float | None = None
+    summary: str | None = None
+    strengths: str | None = None
+    weaknesses: str | None = None
+    questions: str | None = None
+    is_unsplit: bool = Field(
+        default=False,
+        description="참이면 강/약점 미분리 형식 — weaknesses가 리뷰 본문 전체")
+
+
+class ReviewPointDetail(BaseModel):
+    """이 논문의 리뷰에서 추출된 개별 지적 항목.
+
+    ⚠️ 추출기는 리뷰의 weaknesses 필드를 통째로 weakness로 라벨링한다
+    (review_extractor.HeuristicExtractor). 강/약점 미분리 포맷 리뷰는 이 필드가
+    본문 전체라, 거기서 나온 항목은 실제 지적이 아닐 수 있다 —
+    from_unsplit_review로 구분해 '지적'이라 단정하지 않는다.
+    """
+    aspect: str
+    sentiment: str = Field(description="weakness | strength | question")
+    text: str
+    from_unsplit_review: bool = Field(
+        default=False,
+        description="강/약점 미분리 리뷰에서 나온 항목. 참이면 지적으로 단정 금지")
+
+
+class PaperDetail(BaseModel):
+    """유사 논문 1편의 상세 (get_paper_detail 반환).
+
+    Report에 싣지 않고 별도로 조회한다 — 이웃 20편의 리뷰 전문을 매 분석마다
+    실어 보내면 대부분 열람되지 않는 데이터이고, analyze() 계약도 무거워진다.
+    원문 PDF는 저장하지 않으므로 OpenReview/arXiv 링크만 제공한다.
+    """
+    paper_id: int
+    openreview_id: str
+    title: str
+    abstract: str | None = None
+    authors: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    primary_area: str | None = None
+    venue: str
+    year: int
+    decision: str
+    meta_review: str | None = None
+
+    openreview_url: str = Field(description="OpenReview 포럼(리뷰 원본) 링크")
+    pdf_url: str = Field(description="OpenReview PDF 링크")
+    arxiv_url: str | None = Field(default=None, description="arXiv 링크 (있을 때만)")
+
+    reviews: list[ReviewDetail] = Field(default_factory=list)
+    review_points: list[ReviewPointDetail] = Field(default_factory=list)
+
+
 class ReviewPattern(BaseModel):
     """유사 논문들에서 반복 등장하는 지적 패턴.
 

@@ -88,21 +88,42 @@ def review_analysis_node(state: PipelineState, embedder, llm) -> dict:
         return {"review_patterns": []}
 
     with cursor() as cur:
+        # '측정 가능한' 이웃 = 모든 리뷰가 파싱된 논문. 강/약점 미분리 리뷰 중
+        # 약점 섹션을 못 살린 것이 하나라도 있으면 그 논문의 지적을 전부 봤다고
+        # 할 수 없어, 분모에 넣으면 '지적 안 받음'으로 잘못 세어진다.
+        # build_base_rates.py의 분모 정의와 반드시 같아야 lift가 성립한다.
+        cur.execute(
+            """
+            SELECT r.paper_id
+            FROM reviews r
+            LEFT JOIN (
+                SELECT DISTINCT review_id FROM review_points
+                WHERE sentiment = 'weakness'
+            ) x ON x.review_id = r.id
+            WHERE r.paper_id = ANY(%s)
+            GROUP BY r.paper_id
+            HAVING bool_and(NOT r.needs_llm_split OR x.review_id IS NOT NULL)
+            """,
+            (paper_ids,))
+        measurable = {r[0] for r in cur.fetchall()}
+        if not measurable:
+            return {"review_patterns": []}
+
         cur.execute(
             """
             SELECT paper_id, aspect, text FROM review_points
             WHERE paper_id = ANY(%s) AND sentiment = 'weakness'
             """,
-            (paper_ids,))
+            (sorted(measurable),))
         points = [{"paper_id": r[0], "aspect": r[1], "text": r[2]}
                   for r in cur.fetchall()]
 
     patterns = aggregate_by_aspect(
         points,
-        total_papers=len(paper_ids),
+        total_papers=len(measurable),
         base_rates=load_base_rates(),
         decisions={p.paper_id: p.decision for p in papers},
-        all_paper_ids=set(paper_ids),
+        all_paper_ids=measurable,
     )
     return {"review_patterns": patterns}
 

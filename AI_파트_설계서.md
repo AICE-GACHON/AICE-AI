@@ -80,8 +80,9 @@ Supervisor 패턴 대신 **고정 DAG**. 워크플로우가 매번 동일하므�
 
 ```
 1. fetch_openreview   : venue×연도 단위로 논문+리뷰+메타리뷰+rebuttal+decision 수집
-2. fetch_s2           : Semantic Scholar에서 메타데이터, 인용 관계, 저자 ID, venue 보강
-3. fetch_arxiv        : arXiv ID 매칭, 초록/카테고리 보강
+2. fetch_arxiv        : arXiv OAI-PMH 하베스트 → 제목 매칭으로 arXiv ID 확정 (§20)
+3. fetch_s2           : Semantic Scholar에서 s2_paper_id, 인용수/인용 관계, 저자 ID,
+                        최종 게재처 보강 (arXiv ID를 키로 batch 조회) (§20)
 4. extract_review_points : 리뷰 → Haiku → 구조화된 지적 항목 리스트 (아래 §4)
 5. link_submissions   : 재투고 흐름 매칭 (아래 §6)
 6. embed              : SPECTER2로 논문/지적항목 임베딩
@@ -606,7 +607,7 @@ similarity_percentile만** 담는다 (§11.2). JSON 직렬화 왕복 테스트 �
 
 | 순위 | 방법 | confidence | 상태 |
 |---|---|---|---|
-| 1 | arXiv ID 일치 | 1.00 | arxiv_id가 아직 전부 NULL(S2 보강 전) → **현재 no-op**, 채워지면 자동 활성화 |
+| 1 | arXiv ID 일치 | 1.00 | ✅ 작동 (§20의 arXiv 매칭으로 arxiv_id가 채워진 뒤 활성화됨) |
 | 2 | 정규화 제목 정확 일치 | 0.95 | ✅ 작동 |
 | 3 | 제목 유사(pg_trgm ≥ 0.7) + 저자 Jaccard ≥ 0.5 | = 제목 유사도 | ✅ 작동 |
 
@@ -848,7 +849,7 @@ GNN 쿼리 실측: 이웃 평균 5.37, 통과 6.25 vs 탈락 5.19, 경계 ICLR 2
 
 ---
 
-## 20. 논문별 유사도 점수 폐기 + 검색 신뢰도 도입 (2026-07-26)
+## 21. 논문별 유사도 점수 폐기 + 검색 신뢰도 도입 (2026-07-26)
 
 ### 20.1 문제: 점수가 전부 100이었다
 
@@ -919,3 +920,72 @@ weak 판정이면 `is_reliable=False`, 요약 **첫 줄**에 경고, 데모는 �
 `similarity_percentile()` 함수 자체는 남는다 — 쿼리 단위 판정의 기준선 근거이고,
 경계값(0.90/0.93)이 이 분포에서 나왔기 때문이다. 다만 **논문별 표시 금지**를
 독스트링에 명시했다.
+
+---
+
+## 20. arXiv ID 매칭 + Semantic Scholar 보강 (2026-07-26)
+
+§2.3의 `fetch_s2` / `fetch_arxiv` 단계가 그동안 비어 있었다 — `S2_API_KEY`는 config가
+읽기만 하고 아무도 쓰지 않았고, `papers.arxiv_id`/`s2_paper_id`는 43,515편 전부 NULL,
+`citations`는 0행이었다. 그 결과 재투고 매칭의 1순위(arXiv ID 일치, confidence 1.00)가
+구조상 no-op이었다(§15.1). 이 절은 그 구멍을 메운 구현이다.
+
+### 20.1 왜 "제목으로 S2에 물어보기"가 아닌가 (실측)
+
+| 엔드포인트 | 실측 결과 | 결론 |
+|---|---|---|
+| 키 없는 모든 호출 | **항상 429** (익명 풀이 전역 포화) | API 키 필수 |
+| `GET /paper/{id}` (키 O) | 200, 정상 | 단건 확인용 |
+| `POST /paper/batch` | 1요청 **500 id**, 미발견은 `null`, 순서 보존 | **주력** |
+| `GET /paper/search/match` | 제목 1건 = 요청 1건, 키가 있어도 429 잦음 | 43k 매칭에 사용 불가 |
+| `GET /paper/search/bulk` | 1페이지 1,000건 + token, `query` 없이 venue/year만으로 동작. 다만 **깊은 페이지에서 429/500이 연속**으로 나고 몇 분씩 막힌다 | 보조 수단 |
+
+즉 **제목→논문 매칭을 S2로 43,515번 하는 경로는 존재하지 않는다.** 그래서 제목 매칭은
+arXiv 쪽에서 대량으로 받아 로컬에서 하고, S2는 arXiv ID를 키로 batch 조회한다.
+
+### 20.2 arXiv OAI-PMH 하베스트 (`ingest/arxiv_client.py`)
+
+1요청에 **1,300건 / 약 16초**(≈87건/초). cs+stat, datestamp 2018-01-01 이후를 통째로
+받아 `data/raw/arxiv_meta.jsonl.gz`에 (id, title, created, updated, categories,
+저자 keyname)만 남긴다. 실측 특성:
+
+- `from`은 제출일이 아니라 **datestamp(최종 수정일)** 기준 → 오래된 논문도 수정 이력이
+  있으면 들어온다. 커버리지엔 유리하고 누락 위험은 없다.
+- resumptionToken에 `from=...&skip=N`이 들어 있어 **토큰만 저장하면 중단 후 이어받기**가
+  된다 (`data/raw/arxiv_harvest.json`).
+- 과부하 시 503 + `Retry-After`. 병렬 하베스트는 금지되어 순차로만 받는다.
+- `status="deleted"` 레코드는 metadata가 없다 → 건너뛴다.
+- 제목이 XML에서 줄바꿈되어 오므로 공백을 flatten해야 정규화 제목이 맞는다.
+
+### 20.3 매칭 규칙 (`ingest/arxiv_matcher.py`)
+
+오탐 하나가 재투고 링크를 confidence 1.00으로 오염시키므로 **보수적으로** 잡았다.
+
+1. 정규화 제목(소문자+영숫자, `submission_linker.normalize_title` 재사용) **완전 일치**만 후보
+2. 정규화 제목이 25자 미만이면 건너뜀 (일반 명사구 충돌)
+3. 양쪽에 저자가 있으면 **성(姓)이 최소 1개 겹쳐야** 함 — 동명 논문이 실제로 존재
+4. 후보가 여럿이면 성 겹침이 가장 큰 것, **동점이면 포기**
+5. arXiv 등록 연도가 투고 연도보다 1년 이상 늦으면 다른 논문으로 간주
+
+### 20.4 S2 보강 (`ingest/s2_client.py`, `ingest/s2_enricher.py`)
+
+- **by-arxiv** (주력): `ARXIV:<id>`로 500건씩 batch 조회 → `s2_paper_id`,
+  `citation_count`(신규 컬럼), `final_venue`(프리프린트 서버는 제외), `authors.s2_author_id`.
+  저자 ID는 성으로 맞추고 **논문 안에 같은 성이 둘 이상이면 건너뛴다**.
+- **by-venue** (보조): 아직 s2_paper_id가 없는 논문을 학회 단위로 bulk 조회해 제목으로
+  맞춘다. S2에는 채택 논문만 학회 venue로 색인되므로 reject/withdrawn은 거의 못 잡는다.
+  실측 커버리지는 낮다 — ICLR 2020 채택 687편 중 S2 `venue=ICLR&year=2020` 슬라이스에
+  없는 것이 402편이고, 반대로 그 슬라이스에는 **ICLR 2021 논문(DDIM)이 섞여** 있다.
+  S2의 publication year가 학회 연도와 어긋나기 때문 → 연도 ±1로 넓히고 학회 단위 제목
+  맵으로 맞춘다. 그리고 페이지 단위로 즉시 반영해 중간에 막혀도 성과가 남게 했고,
+  연속 3회 실패하면 by-venue를 중단한다(재시도 시간 낭비 방지, 재실행하면 이어짐).
+- **citations**: batch의 `references.paperId`로 **코퍼스 내부 엣지만** 적재.
+
+### 20.5 실행
+
+```bash
+docker exec -i paper-assistant-db psql -U paper -d paper_assistant < scripts/migrate_s2_fields.sql
+python scripts/run_enrichment.py      # 하베스트 → arXiv 매칭 → S2 보강 → 재투고 재계산
+```
+
+하베스트가 전체 시간의 대부분(2~3시간)이고 나머지는 10~20분. 모든 단계가 멱등이다.

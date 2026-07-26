@@ -1,7 +1,7 @@
 """휴리스틱 지적항목 추출 테스트 (LLM 불필요)."""
 from paper_assistant.ingest.normalize import NormalizedReview
 from paper_assistant.ingest.review_extractor import (
-    HeuristicExtractor, classify_aspect)
+    HeuristicExtractor, classify_aspect, split_weakness_section)
 
 
 def _review(weaknesses="", questions="", needs_split=False):
@@ -81,3 +81,61 @@ def test_questions_are_included_as_question_sentiment():
 
 def test_empty_review_yields_nothing():
     assert HeuristicExtractor().extract(_review()) == []
+
+
+# --- 미분리 리뷰의 약점 섹션 복구 ---------------------------------------
+
+_PROS_CONS = (
+    "This paper studies an interesting problem and the idea is neat.\n\n"
+    "Pros\n"
+    "- The results are strong and the writing is clear.\n"
+    "- The idea of masking latents is elegant.\n\n"
+    "Cons\n"
+    "- No comparison to recent baselines such as method X is provided.\n"
+    "- The experiments are limited to small datasets like MNIST only.\n")
+
+
+def test_split_weakness_section_takes_only_cons():
+    section = split_weakness_section(_PROS_CONS)
+    assert section is not None
+    assert "recent baselines" in section
+    assert "limited to small datasets" in section
+    # 강점 섹션과 도입부는 들어오면 안 된다
+    assert "elegant" not in section
+    assert "interesting problem" not in section
+
+
+def test_split_weakness_section_returns_none_without_header():
+    prose = ("This paper proposes a new estimator and derives its variance. "
+             "The derivation appears correct and the experiments are adequate.")
+    assert split_weakness_section(prose) is None
+
+
+def test_split_weakness_section_ignores_header_without_body():
+    assert split_weakness_section("Weaknesses:\nNone.") is None
+
+
+def test_unsplit_review_with_header_yields_weakness():
+    points = HeuristicExtractor().extract(
+        _review(weaknesses=_PROS_CONS, needs_split=True))
+    assert points
+    assert all(p.sentiment == "weakness" for p in points)
+    assert {"baselines", "experimental_scale"} <= {p.aspect for p in points}
+
+
+def test_unsplit_review_without_header_is_marked_unknown():
+    """머리말이 없으면 지적이라 단정하지 않는다 — 집계에서 빠져야 한다."""
+    body = ("This paper proposes a new deterministic policy gradient method. "
+            "The main idea is based on a Vine gradient estimator. "
+            "The empirical evaluation covers three continuous control tasks.")
+    points = HeuristicExtractor().extract(_review(weaknesses=body,
+                                                  needs_split=True))
+    assert points
+    assert all(p.sentiment == "unknown" for p in points)
+
+
+def test_split_format_review_is_untouched_by_recovery():
+    """분리 포맷(needs_llm_split=False)은 예전 그대로 weakness로 들어간다."""
+    points = HeuristicExtractor().extract(
+        _review(weaknesses="- No comparison to recent baselines is provided."))
+    assert [p.sentiment for p in points] == ["weakness"]

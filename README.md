@@ -45,6 +45,11 @@ python scripts/verify_normalize.py              # 10개 venue 정규화 검증
 python scripts/verify_embedding.py              # SPECTER2 차원·품질·속도 검증
 python scripts/load_pilot.py 200                # 수집→임베딩→적재→검색 end-to-end
 python scripts/build_base_rates.py              # 코퍼스 aspect base rate 계산 (수집 후 1회)
+python scripts/run_enrichment.py                # arXiv 하베스트→매칭→S2 보강→재투고 재계산
+python -m paper_assistant.ingest.arxiv_client   # (개별) arXiv 하베스트, 2~3시간·재개 가능
+python -m paper_assistant.ingest.arxiv_matcher  # (개별) arXiv id 매칭 → papers.arxiv_id
+python -m paper_assistant.ingest.s2_enricher    # (개별) S2 보강 (s2_paper_id·인용수·저자ID)
+python -m paper_assistant.ingest.submission_linker   # (개별) 재투고 매칭 재계산
 python scripts/build_venue_stats.py             # venue별 rating 기준선·당락 경계 (수집 후 1회)
 python scripts/verify_confidence.py             # 도메인 안/밖 쿼리로 검색 신뢰도 검증
 pytest tests/                                   # 회귀 테스트 (DB 없으면 통합 테스트만 skip)
@@ -177,6 +182,10 @@ paper_assistant/
 │   ├── openreview_client.py   # v1/v2 분기 + 토큰 캐시 + 페이지네이션 + 백오프
 │   ├── normalize.py           # venue×연도별 필드 차이 → 단일 스키마
 │   ├── review_extractor.py    # 휴리스틱 지적항목 추출($0) / Haiku(플레이스홀더)
+│   ├── arxiv_client.py        # arXiv OAI-PMH 대량 하베스트 (+ 단건 제목 검색)
+│   ├── arxiv_matcher.py       # 로컬 arXiv 캐시 → papers.arxiv_id (제목+저자 성)
+│   ├── s2_client.py           # Semantic Scholar batch / search-bulk + 백오프
+│   ├── s2_enricher.py         # s2_paper_id·인용수·최종 게재처·저자ID·인용 엣지
 │   ├── submission_linker.py   # 재투고 매칭 (arXiv→제목→제목+저자)
 │   ├── run_pilot.py           # ICLR 2024 파일럿
 │   └── run_ingest.py          # 전체 43k 수집·적재 (멱등 재개)
@@ -206,6 +215,12 @@ tests/                         # 회귀 테스트 99건
 
 ```bash
 docker exec -i paper-assistant-db psql -U paper -d paper_assistant < scripts/build_indexes.sql
+```
+
+이미 적재된 DB라면 보강용 컬럼(`papers.citation_count`)을 먼저 추가할 것 (멱등):
+
+```bash
+docker exec -i paper-assistant-db psql -U paper -d paper_assistant < scripts/migrate_s2_fields.sql
 ```
 
 `demo/`는 팀 시연용 임시 웹 화면 (독립 폴더, 나중에 삭제 가능) — [demo/README.md](demo/README.md).
